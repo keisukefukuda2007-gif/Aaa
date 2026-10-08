@@ -112,6 +112,10 @@ img.pix.dim{filter:brightness(0) opacity(.25)}
 .locked .reg-s,.locked .les-s{color:#6c6f7a}
 .les.done .les-n{background:var(--up)}
 .les.boss .les-n{background:var(--dn)}
+.les.exam .les-n{background:var(--gold);color:var(--ink)}
+.exam-sk{display:grid;grid-template-columns:auto 1fr auto;gap:2px 10px;align-items:baseline;font-size:15px}
+.exam-sk .ok-m{color:var(--up)}.exam-sk .ng-m{color:var(--dn)}
+.exam-score{font-size:20px}
 .ch-intro p{margin:.3em 0}
 
 /* 課題ボード */
@@ -453,6 +457,8 @@ textarea{font-size:12px;line-height:1.4;resize:vertical;font-family:ui-monospace
           lessons:[{ id:'ch3.l1', title:'…', scene:'cafe', cast:['me','sendo'],
                      panel:['bs','pl','cf'], next:'次回予告', steps:[ …ステップ… ] }],
           boss:{ id:'ch3.boss', title:'…', scene:'meeting', hp:4, steps:[…], stage:3 },
+          exam:{ id:'ch3.exam', title:'総合テスト', scene:'office', cast:['me','luka'], n:15, pass:0.8,
+                 intro:'導入の台詞', pool:['ch3.q.xxx', …] },   … 任意。大型案件のあとに受ける章末試験
           glossary:[{ id:'用語', desc:'説明' }],
           myths:[{ id:'ch3.m.xxx', name:'思い込みの一文', desc:'正しい理解' }],
           cards:[{ id:'ch3.c.xxx', name:'取引名', txn:()=>Txn.borrow(100), rows:['現金','借入金'] }],
@@ -488,7 +494,10 @@ textarea{font-size:12px;line-height:1.4;resize:vertical;font-family:ui-monospace
       Game.building(段階, {name, scene, draw(p, slot, t), anim(p, slot, t)}) … 拠点の店の成長段階。
         scene の slot={x,w} に描く。第3章以降で段階3を足すなら、新しい場面＋slot を用意してよい。
       Game.cast(id, {name, hair, body, col}) / Game.item(id, {name, rows})
-   8. 起動時の自己検査: 全問題を乱数60通りで生成し、答えの整数性・問題文の数値・
+   8. 総合テスト（exam）: pool の問題から、課題ごとに最低1問を含めて n 問を毎回選び直して出す。
+        ヒントなし・その場の再挑戦なし（間違えた問題は翌日の復習に回る）。pass 以上の正答率で修了。
+        大型案件のあとに開放され、受験すると「次はここ」が次の章へ進む。
+   9. 起動時の自己検査: 全問題を乱数60通りで生成し、答えの整数性・問題文の数値・
       BSの左右一致・CFと現金の一致・説明の連続数を検査する（設定画面に結果表示）。
    ========================================================================== */
 'use strict';
@@ -931,6 +940,7 @@ Game.chapter = def => {
   for (const s of def.skills || []) { s.chapter = def.id; Game.skills[s.id] = s; }
   def.lessons.forEach((l, i) => { l.chapter = def.id; l.index = i; l.kind = 'lesson'; Game.lessons[l.id] = l; });
   if (def.boss) { def.boss.chapter = def.id; def.boss.kind = 'boss'; Game.lessons[def.boss.id] = def.boss; }
+  if (def.exam) { def.exam.chapter = def.id; def.exam.kind = 'exam'; Game.lessons[def.exam.id] = def.exam; }
   for (const t of def.glossary || []) { t.chapter = def.id; Game.terms[t.id] = t; }
   for (const m of def.myths || []) { m.chapter = def.id; Game.myths[m.id] = m; }
   for (const c of def.cards || []) { c.chapter = def.id; Game.cards[c.id] = c; }
@@ -948,6 +958,7 @@ Game.lessonOpen = l => {
   const ch = Game.chapters.find(c => c.id === l.chapter);
   if (!Game.chapterOpen(ch)) return false;
   if (l.kind === 'boss') return ch.lessons.every(x => Game.state.lessons[x.id]?.done);
+  if (l.kind === 'exam') return ch.boss ? !!Game.state.lessons[ch.boss.id]?.done : ch.lessons.every(x => Game.state.lessons[x.id]?.done);
   const prev = ch.lessons[l.index - 1];
   return !prev || !!Game.state.lessons[prev.id]?.done;
 };
@@ -956,6 +967,7 @@ Game.nextLesson = () => {
     if (!Game.chapterOpen(ch)) return null;
     for (const l of ch.lessons) if (!Game.state.lessons[l.id]?.done) return l;
     if (ch.boss && !Game.state.lessons[ch.boss.id]?.done) return ch.boss;
+    if (ch.exam && !Game.state.lessons[ch.exam.id]?.done) return ch.exam;
   }
   return null;
 };
@@ -1017,6 +1029,14 @@ Game.selfTest = (N = 60) => {
       for (const t of st.terms || []) if (!Game.terms[t]) errs.push(`${l.id}: 未登録の用語 ${t}`);
       if (st.txn) { try { const L = new Ledger(st.ledger?.open || {}); L.post(st.txn); L.check().forEach(e => errs.push(`${l.id} 手順${i + 1}: ${e}`)); } catch (e) { errs.push(`${l.id} 手順${i + 1}: ${e.message}`); } }
     });
+  }
+  for (const ch of Game.chapters) {
+    const ex = ch.exam; if (!ex) continue;
+    const pool = ex.pool || [];
+    pool.forEach(id => { if (!Game.Q[id]) errs.push(`${ex.id}: 未登録の問題 ${id}`); else if (Game.Q[id].rare) errs.push(`${ex.id}: 相談の問題は入れない ${id}`); });
+    if (pool.length < (ex.n || 15)) errs.push(`${ex.id}: 問題の候補 ${pool.length} が出題数 ${ex.n || 15} より少ない`);
+    const sk = new Set(pool.map(id => Game.Q[id]?.skill).filter(Boolean));
+    if (sk.size > (ex.n || 15)) errs.push(`${ex.id}: 課題の数 ${sk.size} が出題数より多い`);
   }
   for (const s of Object.values(Game.skills)) {
     if (!Object.values(Game.Q).some(q => q.skill === s.id && !q.rare)) errs.push(`課題 ${s.id} に問題がない`);
@@ -2733,7 +2753,7 @@ Game.Panel = Panel;
 const header = (title, back = 'hub') => `<header class="top"><button type="button" class="btn-ghost" data-go="${back}" aria-label="戻る">◀ 戻る</button><h2 class="top-t">${title}</h2><span></span></header>`;
 const bindGo = root => $$('[data-go]', root).forEach(b => b.addEventListener('click', () => { Sound.play('tap'); UI.show(b.dataset.go, b.dataset.arg); }));
 const chapterOf = id => Game.chapters.find(c => c.id === id);
-const lessonLabel = l => l.kind === 'boss' ? `大型案件「${l.title}」` : `${l.index + 1}. ${l.title}`;
+const lessonLabel = l => l.kind === 'boss' ? `大型案件「${l.title}」` : l.kind === 'exam' ? l.title : `${l.index + 1}. ${l.title}`;
 const itemIcon = (id, dim) => { const cv = Game.itemSprite(id); if (!cv) return ''; return `<img class="pix ${dim ? 'dim' : ''}" alt="" width="${cv.width * 3}" height="${cv.height * 3}" src="${cv.toDataURL()}">`; };
 const charIcon = (id, s = 3) => { const d = Game.castDefs[id]; if (!d) return ''; const cv = Game.charSprite(d, false); return `<img class="pix" alt="" width="${cv.width * s}" height="${cv.height * s}" src="${cv.toDataURL()}">`; };
 const skillStats = (chId) => {
@@ -2819,7 +2839,7 @@ Screens.hub = () => {
     <div class="scene-wrap"><canvas class="scene" aria-label="${esc(b.name)}の様子"></canvas></div>
     ${vis ? `<button type="button" class="win rare-banner" id="b-rare">${charIcon(vis.who, 2)}<span><b>飛び込み相談</b><br>${esc(Game.castName(vis.who))}が相談に来ている。解ければ珍しいカードがもらえる（今日だけ）</span></button>` : ''}
     <div class="hub-cards">
-      ${nl ? `<div class="win card next-c"><div class="tiny">第${ch.no}章　${esc(ch.region?.name || '')}</div><div class="card-t">${esc(lessonLabel(nl))}</div>${nl.kind === 'boss' ? '<p class="tiny">章の総合課題。信用（HP）は4。尽きたら撤退してやり直し。</p>' : (nl.time ? `<p class="tiny">目安 ${nl.time}分</p>` : '')}<button type="button" class="btn big" id="b-next">${nl.kind === 'boss' ? '挑む' : 'はじめる'}</button></div>`
+      ${nl ? `<div class="win card next-c"><div class="tiny">第${ch.no}章　${esc(ch.region?.name || '')}</div><div class="card-t">${esc(lessonLabel(nl))}</div>${nl.kind === 'boss' ? '<p class="tiny">章の総合課題。信用（HP）は4。尽きたら撤退してやり直し。</p>' : nl.kind === 'exam' ? `<p class="tiny">章のまとめの試験。全${nl.n || 15}問、ヒントなし。正答率${Math.round((nl.pass || .8) * 100)}%以上で修了。</p>` : (nl.time ? `<p class="tiny">目安 ${nl.time}分</p>` : '')}<button type="button" class="btn big" id="b-next">${nl.kind === 'boss' ? '挑む' : nl.kind === 'exam' ? '受ける' : 'はじめる'}</button></div>`
       : `<div class="win card next-c"><div class="card-t">公開済みの章はすべて完了</div><p class="tiny">${pendingText ? esc(pendingText) + 'それまでは復習と図鑑集めを進めよう。' : pendingCh ? `次の地域「${esc(pendingCh.name)}」（${esc(pendingCh.theme)}）は準備中です。それまでは復習と図鑑集めを進めよう。` : '全章を完了しました。'}</p></div>`}
       <div class="win card rev-c"><div class="card-t">今日の復習 <b class="big-n">${due}</b>件</div>
         <p class="tiny">${due ? '間違えた問題・迷った問題・思い込みが優先して出る' : (nextDue ? `今日の分は終わり。次は ${U.dayLabel(nextDue.d)} に ${nextDue.n}件` : 'レッスンで解いた問題が、間をあけてここに戻ってくる')}</p>
@@ -2862,13 +2882,14 @@ Screens.chapter = id => {
   const ch = chapterOf(id) || Game.chapters[0];
   const L = Game.state.lessons;
   const st = skillStats(ch.id);
-  const li = l => { const done = L[l.id]?.done, open = Game.lessonOpen(l);
-    return `<li><button type="button" class="win les ${done ? 'done' : ''} ${open ? '' : 'locked'} ${l.kind === 'boss' ? 'boss' : ''}" data-l="${l.id}" ${open ? '' : 'disabled'}>
-      <span class="les-n">${l.kind === 'boss' ? '大型案件' : l.index + 1}</span><span class="les-t">${esc(l.title)}</span>
-      <span class="les-s">${done ? '完了（もう一度遊べる）' : open ? (l.kind === 'boss' ? '挑戦できる' : '次はここ') : 'ロック中'}</span></button></li>`; };
+  const li = l => { const done = L[l.id]?.done, open = Game.lessonOpen(l), ex = l.kind === 'exam';
+    const exS = ex && done ? (L[l.id].passed ? `修了（最高 ${L[l.id].best}/${L[l.id].bestN}）　何度でも受けられる` : `受験済み（最高 ${L[l.id].best}/${L[l.id].bestN}）　修了は正答率${Math.round((l.pass || .8) * 100)}%以上`) : '';
+    return `<li><button type="button" class="win les ${done && (!ex || L[l.id].passed) ? 'done' : ''} ${open ? '' : 'locked'} ${l.kind === 'boss' ? 'boss' : ''} ${ex ? 'exam' : ''}" data-l="${l.id}" ${open ? '' : 'disabled'}>
+      <span class="les-n">${l.kind === 'boss' ? '大型案件' : ex ? '試験' : l.index + 1}</span><span class="les-t">${esc(l.title)}</span>
+      <span class="les-s">${exS || (done ? '完了（もう一度遊べる）' : open ? (l.kind === 'boss' ? '挑戦できる' : ex ? '受けられる' : '次はここ') : (ex ? '大型案件のあとに開放' : 'ロック中'))}</span></button></li>`; };
   app().innerHTML = `<div class="screen">${header(`第${ch.no}章　${esc(ch.title)}`, 'map')}
     <div class="win ch-intro"><div class="tiny">${esc(ch.region?.name || '')}</div><p>${rich(ch.intro || '')}</p><p class="tiny">自力で解けた課題 ${st.self}/${st.n}　定着 ${st.fixed}/${st.n}</p></div>
-    <ul class="lessons">${ch.lessons.map(li).join('')}${ch.boss ? li(ch.boss) : ''}</ul></div>`;
+    <ul class="lessons">${ch.lessons.map(li).join('')}${ch.boss ? li(ch.boss) : ''}${ch.exam ? li(ch.exam) : ''}</ul></div>`;
   bindGo(app());
   $$('.les[data-l]').forEach(b => b.onclick = () => { Sound.play('ok'); startLesson(Game.lessons[b.dataset.l]); });
 };
@@ -2983,7 +3004,18 @@ const Rare = Game.Rare = {
 };
 
 /* ---------------- レッスンの実行 ---------------- */
-function startLesson(l){ new Run(l.kind === 'boss' ? 'boss' : 'lesson', l).start(); }
+function startLesson(l){ if (l.kind === 'exam') return startExam(l); new Run(l.kind === 'boss' ? 'boss' : 'lesson', l).start(); }
+// 総合テスト：課題ごとに最低1問を含めて n 問を選ぶ（毎回選び直す）
+function startExam(l){
+  const r = U.rng(U.seed()), n = l.n || 15, pool = (l.pool || []).filter(id => Game.Q[id]);
+  const bySkill = {};
+  r.shuffle(pool).forEach(id => { const k = Game.Q[id].skill || '-'; (bySkill[k] = bySkill[k] || []).push(id); });
+  const pick = Object.values(bySkill).map(a => a[0]);
+  const rest = r.shuffle(pool.filter(id => !pick.includes(id)));
+  const ids = r.shuffle(pick.concat(rest).slice(0, n));
+  const steps = [{s: (l.cast || [])[1] || 'luka', t: l.intro || '章のまとめの試験です。ヒントはなし。間違えた問題は明日の復習に回ります。'}].concat(ids.map(id => ({q: id})));
+  new Run('exam', Object.assign(Object.create(l), {steps})).start();
+}
 function startReview(){
   const due = SRS.due(10);
   if (!due.length) return;
@@ -3132,7 +3164,7 @@ class Run {
     this.qBy = by;
     this.setMsg(by, rich(m.lead || (st.retry ? (grp ? 'さっきの問題に、もう一度。' : 'さっきの問題を、数字を変えてもう一度。') : TYPE_GUIDE[q.type] || '答えよう。')));
     this.work.innerHTML = `<div class="win qcard ${st.retry ? 'retry' : ''}">
-      <div class="q-head"><span class="q-kind">${st.retry ? '再挑戦' : (this.kind === 'boss' ? '審査' : '問題')}</span>${!fresh && !st.retry ? '<span class="q-tag">今日2回目：練習扱い</span>' : ''}${m.hint ? '<button type="button" class="btn-ghost b-hint">ヒント</button>' : ''}</div>
+      <div class="q-head"><span class="q-kind">${st.retry ? '再挑戦' : (this.kind === 'boss' ? '審査' : this.kind === 'exam' ? `試験 ${this.answered + 1}/${this.total}` : '問題')}</span>${!fresh && !st.retry ? '<span class="q-tag">今日2回目：練習扱い</span>' : ''}${m.hint && this.kind !== 'exam' ? '<button type="button" class="btn-ghost b-hint">ヒント</button>' : ''}</div>
       <div class="q-text">${rich(m.text)}</div>
       <div class="q-body"></div>
       <div class="q-act"><button type="button" class="btn b-hi" disabled>確信して答える</button><button type="button" class="btn btn-2 b-lo" disabled>迷いつつ答える</button></div></div>`;
@@ -3177,13 +3209,14 @@ class Run {
     if (ok && fresh) { this.combo++; this.maxCombo = Math.max(this.maxCombo, this.combo); }
     else if (!ok) this.combo = 0;
     if (!ok && !st.retry && this.maxHp) { this.hp = Math.max(0, this.hp - 1); this.drawHp(); }
-    if (!ok && !st.retry) { this.requeue.push({qid: q.id, wait: 4}); this.wrongIds.add(q.id); }
+    if (this.kind === 'exam') { (this.log = this.log || []).push({id: q.id, skill: q.skill, ok}); if (!ok) this.wrongIds.add(q.id); }
+    else if (!ok && !st.retry) { this.requeue.push({qid: q.id, wait: 4}); this.wrongIds.add(q.id); }
     // 待ち行列を進める
     this.requeue.forEach(r => r.wait--);
     const dueNow = this.requeue.filter(r => r.wait <= 0);
     this.requeue = this.requeue.filter(r => r.wait > 0);
     dueNow.forEach((r, k) => { this.steps.splice(this.i + 1 + k, 0, {q: r.qid, retry: true}); });
-    if (!ok && !st.retry) this.total++;
+    if (!ok && !st.retry && this.kind !== 'exam') this.total++;
     save();
     // 演出
     if (ok) { Sound.play(this.combo >= 3 ? 'combo' : 'ok', this.combo); this.view.fx('jump', 'me'); this.view.fx('sparkle', 'me'); this.view.fx('paper'); }
@@ -3219,7 +3252,7 @@ class Run {
     fb.innerHTML = `<div class="fb-h">${ok ? (q.type === 'estimate' ? '的中！' : '正解！') : (q.type === 'estimate' ? '予想が外れた' : 'ちがう')}</div>
       ${trap}${ok && q.type !== 'estimate' ? '' : `<div class="fb-ans">${q.type === 'estimate' ? '' : '正解：'}${res.answerHtml}</div>`}
       ${m.explain ? `<div class="fb-exp">${rich(m.explain)}</div>` : ''}
-      ${!ok && !st.retry ? '<p class="tiny">この問題は数字を変えて、少し後と明日にもう一度出ます。</p>' : ''}
+      ${!ok && !st.retry ? `<p class="tiny">${this.kind === 'exam' ? 'この問題は数字を変えて、明日の復習に出ます。' : 'この問題は数字を変えて、少し後と明日にもう一度出ます。'}</p>` : ''}
       ${evHTML}<button type="button" class="btn big b-next">${out ? '撤退する' : '次へ'}</button>`;
     this.work.appendChild(fb);
     $('.b-next', fb).onclick = () => { Sound.play('tap'); if (out) this.retreat(); else this.next(); };
@@ -3246,16 +3279,33 @@ class Run {
       if (this.kind === 'boss' && firstClear && L.stage != null && s.stage < L.stage) { s.stage = L.stage; stageUp = Game.buildings[Game.stageOf(L.stage)]; }
       if (this.kind === 'boss' && firstClear) { const ch = chapterOf(L.chapter), nx = Game.chapters[Game.chapters.indexOf(ch) + 1]; unlock = nx ? nx.region?.name || `第${nx.no}章` : (Game.REGIONS[ch.no] ? Game.REGIONS[ch.no].name : null); this.unlockReady = !!nx; }
     }
+    // 総合テスト：得点・修了・課題ごとの正誤
+    let exam = null;
+    if (this.kind === 'exam') {
+      const r = s.lessons[L.id] || (s.lessons[L.id] = {done: false, first: null, runs: 0, best: 0, bestN: 0, passed: null});
+      const n = this.firstN, k = this.firstOk, rate = n ? k / n : 0, pass = n > 0 && rate >= (L.pass || .8) - 1e-9;
+      exam = {n, k, pass, first: pass && !r.passed, need: Math.ceil((L.pass || .8) * n - 1e-9)};
+      r.done = true; r.runs++; if (!r.first) r.first = t;
+      if (!r.bestN || rate > r.best / r.bestN) { r.best = k; r.bestN = n; }
+      if (pass && !r.passed) r.passed = t;
+      const by = {};
+      (this.log || []).forEach(x => { const b = by[x.skill] || (by[x.skill] = {ok: 0, n: 0}); b.n++; if (x.ok) b.ok++; });
+      exam.rows = (chapterOf(L.chapter)?.skills || []).filter(sk => by[sk.id]).map(sk => ({sk, ...by[sk.id]}));
+    }
     save();
     const ev = this.events;
     const selfs = ev.filter(e => e.type === 'self'), fixed = ev.filter(e => e.type === 'fixed'), myths = [...new Set(ev.filter(e => e.type === 'myth').map(e => e.id))], cards = ev.filter(e => e.type === 'card'), overs = ev.filter(e => e.type === 'over');
     const nl = Game.nextLesson();
     const teaser = L.next || (nl ? `次は「${nl.title}」。` : '');
-    Sound.play(this.kind === 'boss' ? 'fanfare' : 'ok');
+    Sound.play(this.kind === 'boss' || (exam && exam.pass) ? 'fanfare' : 'ok');
+    const examHTML = exam ? `<p class="exam-score">得点 <b class="big-n">${exam.k}</b>/${exam.n}（${Math.round(exam.k / Math.max(1, exam.n) * 100)}%）${this.maxCombo >= 3 ? `　最大の波 ×${this.maxCombo}` : ''}</p>
+      <p>${exam.pass ? (exam.first ? `<b>第${chapterOf(L.chapter)?.no}章を修了した！</b>` : '修了ライン突破。') : `修了まであと${exam.need - exam.k}問。間違えた問題を復習してから、もう一度受けよう（問題は毎回選び直される）。`}</p>
+      <div class="res-sec"><h3>課題ごとの結果</h3><div class="exam-sk">${exam.rows.map(x => `<span class="${x.ok === x.n ? 'ok-m' : 'ng-m'}">${x.ok === x.n ? '○' : '×'}</span><span>${esc(x.sk.name)}</span><span>${x.ok}/${x.n}</span>`).join('')}</div></div>` : '';
     app().innerHTML = `<div class="screen res-s"><div class="scene-wrap"><canvas class="scene"></canvas></div><div class="win res">
-      <h2>${this.kind === 'boss' ? '大型案件、達成！' : this.kind === 'review' ? '復習完了' : this.kind === 'rare' ? '相談を終えた' : 'レッスン完了'}</h2>
+      <h2>${this.kind === 'boss' ? '大型案件、達成！' : exam ? (exam.pass ? '総合テスト、修了！' : '総合テスト 結果') : this.kind === 'review' ? '復習完了' : this.kind === 'rare' ? '相談を終えた' : 'レッスン完了'}</h2>
       ${stageUp ? `<p class="stage-up">${esc(s.player.company)}は「${esc(stageUp.name)}」に成長した！</p>` : ''}
-      ${this.firstN ? `<p>初回の正答 <b class="big-n">${this.firstOk}</b>/${this.firstN}${this.maxCombo >= 3 ? `　最大の波 ×${this.maxCombo}` : ''}</p>` : ''}
+      ${examHTML}
+      ${this.firstN && !exam ? `<p>初回の正答 <b class="big-n">${this.firstOk}</b>/${this.firstN}${this.maxCombo >= 3 ? `　最大の波 ×${this.maxCombo}` : ''}</p>` : ''}
       ${selfs.length ? `<div class="res-sec"><h3>自力で解けた課題</h3>${selfs.map(e => { const k = Game.skills[e.skill]; return `<div class="ev ev-self">${k.item ? itemIcon(k.item) : ''}<span>${esc(k.name)}${k.item ? `<br><small>設備「${esc(Game.items[k.item].name)}」</small>` : ''}</span></div>`; }).join('')}</div>` : ''}
       ${fixed.length ? `<div class="res-sec"><h3>定着した課題</h3>${fixed.map(e => `<div>${esc(Game.skills[e.skill].name)}</div>`).join('')}</div>` : ''}
       ${cards.length ? `<div class="res-sec"><h3>取引カード</h3>${cards.map(e => `<div>「${esc(Game.cards[e.id].name)}」</div>`).join('')}</div>` : ''}
@@ -3263,6 +3313,7 @@ class Run {
       ${overs.length ? `<div class="res-sec"><h3>克服した思い込み</h3>${overs.map(e => `<div>「${esc(Game.myths[e.id].name)}」</div>`).join('')}</div>` : ''}
       ${this.terms.length ? `<p class="tiny">図鑑に用語を${this.terms.length}語登録した</p>` : ''}
       ${this.wrongIds.size ? `<p class="tiny">間違えた${this.wrongIds.size}問は明日の復習に出ます。</p>` : ''}
+      ${exam && !exam.pass ? `<div class="row"><button type="button" class="btn" id="r-exam">もう一度受ける</button></div>` : ''}
       ${unlock ? `<div class="teaser"><b>新しい地域</b>「${esc(unlock)}」${this.unlockReady ? 'が開放された！' : 'への道が見えてきた。（準備中）'}</div>` : ''}
       ${teaser ? `<div class="teaser"><b>次回予告</b>　${rich(teaser)}</div>` : ''}
       <div class="row"><button type="button" class="btn btn-2" data-go="hub">拠点へ</button>${nl && this.kind !== 'review' ? `<button type="button" class="btn big" id="r-next">次へ進む</button>` : ''}</div></div></div>`;
@@ -3271,6 +3322,7 @@ class Run {
     setTimeout(() => { v.fx('sparkle', 'me'); v.fx('jump', 'me'); }, 300);
     bindGo(app());
     $('#r-next') && ($('#r-next').onclick = () => { Sound.play('ok'); startLesson(nl); });
+    $('#r-exam') && ($('#r-exam').onclick = () => { Sound.play('ok'); startLesson(Game.lessons[L.id]); });
   }
 }
 Game.Run = Run;
@@ -3279,10 +3331,11 @@ Screens.play_shell = () => {};
 /* ---------------- 起動 ---------------- */
 Game.boot = () => {
   Store.load();
-  Game.selfTest(60);
   UI.show(Game.state.player.name ? 'title' : 'title');
   Game.on('remote-loaded', () => { if (UI.cur === 'title' || UI.cur === 'hub') UI.show(UI.cur); toast('アカウントの続きを読み込みました'); });
   Sync.init();
+  // 自己検査は最初の画面を出してから行う（章が増えても起動を待たせない）。結果は設定画面に出る
+  setTimeout(() => { Game.selfTest(60); if (UI.cur === 'save') UI.show('save'); }, 400);
 };
 })();
 
@@ -4015,7 +4068,7 @@ Game.chapter({
 </script>
 <script id="ch2">
 /* ==========================================================================
-   第2章 財務3表（港の倉庫街）  ― 前半：レッスン1〜6
+   第2章 財務3表（港の倉庫街）  ― レッスン1〜11・大型案件「大口受注の1年」・総合テスト
    ========================================================================== */
 (function(){
 const {U} = Game, f = U.fmt, K = Game.kit, {mix, dark, lite} = Game.color;
@@ -4079,12 +4132,161 @@ Game.item('cart', {name: '台車と木箱', rows: ['..........o.', '.ooooo....o.
 Game.item('stamp', {name: '印鑑と朱肉', rows: ['.oo......', 'oeeo.....', 'oeeo.oooo', 'oeeo.oRRo', 'oRRo.oRRo', 'oooo.oooo']});
 Game.item('ledger', {name: '総勘定元帳', rows: ['.oooooooooo.', 'owwwwwowwwwo', 'owaaawowaawo', 'owwwwwowwwwo', 'owaawwowaaao', 'owwwwwowwwwo', 'oRRRRRoRRRRo', '.oooooooooo.', '...oc..co...', '..occ..cco..']});
 
+/* ---------- 場面：汐見グランドホテルのロビー（昼）・後半の大型案件で使う ---------- */
+Game.scene('hotel', {
+  time: '昼', floor: 134,
+  draw(p, W, H){
+    const r = U.rng(211);
+    // 壁と天井の飾り
+    p.rect(0, 0, W, 106, '#efe2c4'); p.noise(0, 12, W, 94, '#e4d4b0', .06, r);
+    p.rect(0, 0, W, 9, '#7a4a30'); for (let x = 3; x < W; x += 10) p.rect(x, 3, 5, 3, '#9a6440');
+    p.rect(0, 9, W, 3, '#c9a24a'); p.hl(0, W - 1, 9, '#f2d27a');
+    // 大窓（海）。外の景色を描いてから窓枠を重ねる
+    for (const wx of [20, 168]) {
+      p.rect(wx - 3, 22, 74, 74, '#6b4129'); p.ell(wx + 34, 24, 37, 10, '#6b4129');
+      p.grad(wx, 22, 68, 40, ['#7fb8de', '#a9d2ea', '#d6ecf4']); p.ell(wx + 34, 24, 34, 8, '#7fb8de');
+      p.grad(wx, 62, 68, 32, ['#4f8fc0', '#3f78a6', '#2f6a96']);
+      for (let y = 64; y < 94; y += 4) for (let x = wx + (y % 7); x < wx + 66; x += 11) p.rect(x, y, 4, 1, '#8fc0e0');
+      p.hl(wx, wx + 67, 62, '#e8f2f6');
+    }
+    // 窓の外：岬の灯台と客船
+    p.rect(24, 58, 26, 4, '#6a8a4a'); p.hl(24, 49, 58, '#8aaa5a');
+    p.rect(36, 44, 5, 14, '#f6f0e2'); p.rect(36, 48, 5, 3, '#d8483a'); p.rect(35, 42, 7, 2, '#2b2433'); p.rect(37, 40, 3, 2, '#ffe7b0'); p.glow(38, 41, 6, '#ffe7b0', .2);
+    p.rect(210, 68, 22, 4, '#f6f0e2'); p.rect(214, 63, 12, 5, '#f6f0e2'); p.hl(214, 225, 64, '#5b7fae'); p.rect(219, 59, 2, 4, '#d8483a'); p.hl(210, 231, 72, '#2b2433');
+    for (const wx of [20, 168]) {
+      p.rect(wx + 33, 14, 2, 82, '#6b4129'); p.rect(wx, 58, 68, 2, '#6b4129');
+      p.rect(wx - 5, 94, 78, 4, '#c9b28a'); p.hl(wx - 5, wx + 72, 94, '#e6d4ae');
+      for (let i = 0; i < 14; i++) p.alpha(wx + 6 + i, 50 - i * 2, 2, 2, '#ffffff', .25);
+    }
+    // 中央：2本の柱と黒板の案内
+    for (const cx of [108, 148]) { p.rect(cx - 5, 12, 10, 94, '#f6eedc'); p.vl(cx - 5, 12, 105, '#e0d0ae'); p.vl(cx + 4, 12, 105, '#c9b48e'); p.rect(cx - 7, 12, 14, 4, '#c9a24a'); p.rect(cx - 7, 100, 14, 6, '#c9a24a'); }
+    p.rect(116, 34, 24, 30, '#6b4129'); p.rect(118, 36, 20, 26, '#2f3a34'); for (let k = 0; k < 5; k++) p.hl(120, 120 + r.int(9, 15), 40 + k * 4, k === 0 ? '#f2c14e' : '#d8d6cc');
+    // シャンデリア
+    p.vl(128, 12, 17, '#8a6a3a'); p.rect(118, 17, 21, 2, '#c9a24a');
+    for (const dx of [-9, -3, 3, 9]) { p.vl(128 + dx, 19, 21, '#c9a24a'); p.rect(127 + dx, 22, 3, 2, '#fff2c8'); }
+    p.glow(128, 22, 20, '#ffe7b0', .14);
+    // 腰板
+    p.rect(0, 106, W, 14, '#6b4129'); p.hl(0, W - 1, 106, '#9a6440');
+    for (let x = 0; x < W; x += 32) { p.rect(x + 3, 109, 26, 8, '#7a4a30'); p.hl(x + 3, x + 28, 109, '#8a5a38'); }
+    // 床：大理石の市松と赤いじゅうたん
+    p.rect(0, 120, W, 24, '#d8cdb6');
+    for (let y = 120, j = 0; y < H; y += 6, j++) for (let x = (j % 2) * 8; x < W; x += 16) p.rect(x, y, 8, 6, '#efe7d6');
+    p.alpha(0, 120, W, 2, '#1d1630', .2);
+    p.rect(84, 122, 88, 22, '#a2453a'); p.rect(84, 122, 88, 2, '#c9a24a'); p.vl(84, 122, 143, '#c9a24a'); p.vl(171, 122, 143, '#c9a24a');
+    for (let x = 92; x < 168; x += 12) p.rect(x, 131, 4, 4, '#b8584a');
+    // 鉢植えのヤシ
+    for (const px of [4, 236]) {
+      p.rect(px + 2, 108, 14, 12, '#c9a24a'); p.hl(px + 2, px + 15, 108, '#f2d27a'); p.rect(px + 12, 110, 3, 10, '#a07a2a');
+      const fr = U.rng(px + 9); p.vl(px + 9, 86, 108, '#6a5040');
+      for (const [dx, dy, rr] of [[0, 84, 6], [-6, 90, 5], [6, 90, 5], [-3, 96, 4], [4, 97, 4]]) p.clump(px + 9 + dx, dy, rr, ['#2f5e3a', '#3f7d45', '#5b9e52', '#8cc46a'], fr);
+    }
+  },
+  anim(p, W, H, t){
+    const k = Math.floor(t / 300) % 4; p.px(119 + k * 6, 23, '#ffffff');
+    for (const wx of [20, 168]) { const o = Math.floor(t / 500) % 11; for (let y = 66; y < 92; y += 8) p.rect(wx + 2 + ((o * 3 + y) % 60), y, 3, 1, '#d6ecf4'); }
+  },
+});
+
+/* ---------- 人物（第2章後半） ---------- */
+Game.cast('ayase', {id: 'ayase', name: '綾瀬', role: '汐見グランドホテル 購買部長', hair: 'bun', body: 'suit', col: {H: 'o', C: 'n', c: 'o', X: 'y', P: 'n'}});
+
+/* ---------- 設備（第2章後半） ---------- */
+Game.item('invoice', {name: '請求書の束', rows: ['.oooooooo...', '.owwwwwwoo..', '.owaaaawwwo.', '.owwwwwwwwo.', '.owaaawwwwo.', '.owwwwwRRwo.', 'oooooooooooo', 'oyyyyyyyyyyo', 'oyoyyyyyyoyo', 'oyyooyyooyyo', 'oyyyyooyyyyo', 'oooooooooooo']});
+Game.item('beans', {name: '生豆の麻袋', rows: ['..oo....oo..', '.oeeo..oeeo.', 'oeeeeooeeeeo', 'oeceeooeeceo', 'oeeeceoeeeeo', 'oceeeeoeceeo', 'oeeceeoeeeco', 'oeeeeeoeeeeo', '.oooooooooo.', 'oggTggTggTgo', 'oooooooooooo']});
+Game.item('roaster2', {name: '2台目の焙煎機', rows: ['..oo........', '..oo........', '.oooooo.....', 'oRRRRRRo....', 'oRwwwwRooooo', 'oRwccwRoaaao', 'oRwwwwRooooo', 'oRRRRRRo....', 'oaaaaaao....', '.oao.oao....', '.ooo.ooo....']});
+Game.item('chest', {name: '現金箱', rows: ['.oooooooooo.', 'oyyyyyyyyyyo', 'oyccccccccyo', 'oooooooooooo', 'occcccyyccco', 'occcccooccco', 'occcccccccco', 'oooooooooooo']});
+Game.item('abacus', {name: 'そろばん', rows: ['oooooooooooo', 'oaRaaRaaRaao', 'oaaaaaaaaaao', 'oeeeeeeeeeeo', 'oaRaRaaRaRao', 'oaRaaRaRaRao', 'oaaRaRaaRaao', 'oaaaaaaaaaao', 'oooooooooooo']});
+Game.item('calendar', {name: '資金繰り表', rows: ['.o..o..o..o.', 'oRoRRoRRoRRo', 'oRRRRRRRRRRo', 'owwwwwwwwwwo', 'owaawaawaawo', 'owwwwwwwwwwo', 'owaawaawRRwo', 'owwwwwwwwwwo', 'owaawaawaawo', 'owwwwwwwwwwo', 'oooooooooooo']});
+
+/* ---------- 取引（第2章後半） ---------- */
+Game.txn('salesCredit', x => ({desc: '掛けで売上を得る', lines: [{a: '売掛金', dr: x}, {a: '売上高', cr: x}]}));
+
+/* 増減予想の表示名（どの表の数字か） */
+const lab3 = {'売上高': '売上高（PL）', '売上原価': '売上原価（PL）', '減価償却費': '減価償却費（PL）', '営業利益': '営業利益（PL）', '当期純利益': '当期純利益（PL）',
+  '現金': '現金（BS）', '売掛金': '売掛金（BS）', '商品': '商品＝在庫（BS）', '買掛金': '買掛金（BS）', '設備': '設備（BS）', '借入金': '借入金（BS）', '利益剰余金': '利益剰余金（BS）',
+  '営業CF': '営業CF（CF）', '投資CF': '投資CF（CF）', '財務CF': '財務CF（CF）'};
+
+/* ---------- 図：月ごとの利益の累計と現金（黒字倒産） ---------- */
+Game.diagram('cashline', d => {
+  const ms = d.months, n = ms.length, vals = ms.flatMap(x => [x.cash, x.cum]);
+  const hi = Math.max(1, ...vals), lo = Math.min(0, ...vals), top = 6, h = 44;
+  const y = v => top + (hi - v) / (hi - lo) * h, y0 = y(0), cw = 94 / n, x0 = 5;
+  const bar = (x, w, v, col) => { const a = y(Math.max(v, 0)), b = y(Math.min(v, 0)); return `<rect x="${x.toFixed(1)}" y="${a.toFixed(1)}" width="${w.toFixed(1)}" height="${Math.max(.6, b - a).toFixed(1)}" style="fill:${col}"/>`; };
+  const lab = (x, v, col) => `<text x="${x.toFixed(1)}" y="${(v >= 0 ? y(v) - 1.2 : y(v) + 3.4).toFixed(1)}" text-anchor="middle" style="fill:${col};font-size:2.9px">${f(v)}</text>`;
+  let g = '';
+  ms.forEach((m, i) => {
+    const bx = x0 + i * cw, cc = m.cash < 0 ? 'var(--dn)' : 'var(--teal)';
+    g += bar(bx + cw * .1, cw * .38, m.cum, 'var(--up)') + lab(bx + cw * .29, m.cum, 'var(--up)');
+    g += bar(bx + cw * .52, cw * .38, m.cash, cc) + lab(bx + cw * .71, m.cash, cc);
+    g += `<text x="${(bx + cw / 2).toFixed(1)}" y="61" text-anchor="middle" style="fill:var(--ink);font-size:3px">${m.m}か月目</text>`;
+  });
+  return `<svg viewBox="0 0 100 64" style="width:100%;height:auto;display:block" role="img" aria-label="月ごとの利益の累計と月末の現金"><line x1="3" x2="99" y1="${y0.toFixed(1)}" y2="${y0.toFixed(1)}" style="stroke:var(--ink);stroke-width:.4"/>${g}</svg>
+    <p class="dg-note"><span style="color:var(--up)">■</span> 利益の累計　<span style="color:var(--teal)">■</span> 月末の現金（<span style="color:var(--dn)">■</span> マイナス）　単位：万円</p>${d.note ? `<p class="dg-note">${U.rich(d.note)}</p>` : ''}`;
+});
+
+/* ---------- 数字を作る道具（第2章後半） ---------- */
+// 黒字倒産の再現：売上は毎月 g ずつ伸び、代金は2か月後に入金。原価と固定費はその月に現金払い
+const kurojiMonths = p => {
+  let cash = p.C0, cum = 0; const out = [];
+  for (let k = 1; k <= 6; k++) {
+    const s = p.s1 + p.g * (k - 1), cost = s * p.c / 100, inc = k > 2 ? p.s1 + p.g * (k - 3) : 0, pay = cost + p.F, profit = s - cost - p.F;
+    cash += inc - pay; cum += profit; out.push({m: k, s, cost, inc, pay, profit, cum, cash});
+  }
+  return out;
+};
+const kuroji = r => r.find(() => ({s1: r.pick([80, 100, 120, 150]), g: r.pick([40, 50, 60, 70]), c: r.pick([50, 60]), F: r.pick([20, 30, 40]), C0: r.pick([150, 180, 200, 220, 250, 280, 300])}), p => {
+  const m = kurojiMonths(p), last = m[5];
+  // 毎月黒字・2か月目までは現金が残る・6か月目はマイナス（予想の目盛り10に乗る）・現金＝最初の現金＋利益の累計−売掛金
+  return m.every(x => x.profit > 0 && U.isInt(x.cost)) && m[1].cash > 0 && last.cash < 0 && last.cash % 10 === 0 && last.cash >= -400
+    && last.cash === p.C0 + last.cum - (m[4].s + last.s);
+}, 2000);
+
+// 間接法の題材：取引を会計エンジンに通し、利益と営業CFのずれを作る（mixed:true で減少も混ぜる）
+const indirectOpen = p => ({'現金': p.C0, '売掛金': p.AR0, '商品': p.I0, '設備': p.F0, '買掛金': p.AP0, '資本金': p.C0 + p.AR0 + p.I0 + p.F0 - p.AP0});
+const indirectTxns = p => { const P = p.CG + p.dInv; return [Txn.buyStockCredit(P), Txn.sellCredit(p.S, p.CG), Txn.collectAR(p.S - p.dAR), Txn.payAP(P - p.dAP), Txn.salary(p.SAL), Txn.depreciate(p.D)]; };
+const indirectOf = p => { const L = new Game.Ledger(indirectOpen(p)).post(indirectTxns(p)); return {L, NI: L.pl().ni, OP: L.cfs().op}; };
+const indirectCase = (r, mixed) => r.find(() => {
+  const S = r.pick([800, 1000, 1200, 1500]), c = r.pick([50, 60]);
+  return {S, CG: S * c / 100, SAL: r.pick([150, 200, 250]), D: r.pick([40, 50, 60, 80]),
+    dAR: mixed ? r.pick([-40, -20, 30, 50, 80]) : r.pick([30, 50, 80, 100]), dInv: mixed ? r.pick([-30, -20, 20, 40]) : r.pick([20, 30, 40, 60]), dAP: mixed ? r.pick([-20, 10, 20, 30]) : r.pick([10, 20, 30]),
+    C0: r.pick([300, 400]), AR0: r.pick([100, 150, 200]), I0: r.pick([80, 100, 120]), AP0: r.pick([60, 80, 100]), F0: r.pick([400, 500])};
+}, p => {
+  if (!(p.S - p.CG - p.SAL - p.D > 0 && p.AR0 + p.dAR > 0 && p.I0 + p.dInv > 0 && p.AP0 + p.dAP > 0)) return false;
+  const {L, NI, OP} = indirectOf(p);
+  // 間接法の式と、会計エンジン（直接法）の営業CFが一致することを確かめる
+  return OP === NI + p.D - p.dAR - p.dInv + p.dAP && L.check().length === 0 && L.b('売掛金') === p.AR0 + p.dAR && L.b('商品') === p.I0 + p.dInv && L.b('買掛金') === p.AP0 + p.dAP;
+});
+
+// 大型案件「大口受注の1年」：期首のBSと1年分の取引を会計エンジンに通して、全問題の数字を作る
+const bossOpen = p => ({'現金': p.C0, '売掛金': p.AR0, '商品': p.I0, '設備': p.F0, '買掛金': p.AP0, '借入金': p.D0, '資本金': p.K, '利益剰余金': p.RE0});
+const bossEnd = p => ({'現金': p.C1, '売掛金': p.AR0 + p.dAR, '商品': p.I0 + p.dInv, '設備': p.F0 + p.E - p.DEP, '買掛金': p.AP0 + p.dAP, '借入金': p.D0 + p.B - p.R, '資本金': p.K, '利益剰余金': p.RE0 + p.NI});
+const bossYear = p => {
+  const RE0 = p.C0 + p.AR0 + p.I0 + p.F0 - p.AP0 - p.D0 - p.K;
+  const S = p.S0 + 12 * p.h, CG = S * p.c / 100, dAR = 2 * p.h, dInv = p.h * p.c / 100, dAP = p.h * p.c / 200;
+  const P = CG + dInv, DEP = p.d0 + p.E / p.n, I = (p.D0 + p.B) * p.rate / 100;
+  const pre = S - CG - p.SAL - p.RENT - DEP - I, T = pre * 30 / 100;
+  const ints = [RE0, CG, dInv, dAP, DEP, I, T].every(U.isInt);
+  if (!ints || RE0 < 50 || pre <= 0) return {ok: false};
+  const q = Object.assign({}, p, {RE0});
+  const L = new Game.Ledger(bossOpen(q)).post([Txn.borrow(p.B), Txn.buyEquip(p.E), Txn.buyStockCredit(P), Txn.sellCredit(S, CG), Txn.collectAR(S - dAR), Txn.payAP(P - dAP),
+    Txn.salary(p.SAL), Txn.rent(p.RENT), Txn.depreciate(DEP), Txn.interest(I), Txn.tax(T), Txn.repay(p.R)]);
+  const pl = L.pl(), cf = L.cfs(), NI = pl.ni, OP = cf.op, C1 = L.b('現金');
+  const ok = p.I0 >= p.h * p.c / 100 && NI > 0 && C1 > 0 && OP > 0 && OP === NI + DEP - dAR - dInv + dAP && L.check().length === 0 && p.V * 2 <= NI && C1 > p.V
+    && L.b('売掛金') === p.AR0 + dAR && L.b('設備') === p.F0 + p.E - DEP;
+  return {ok, RE0, S, CG, dAR, dInv, dAP, DEP, I, T, NI, OP, C1, gross: pl.gross, opInc: pl.op, ord: pl.ord};
+};
+const bossPlan = r => r.find(() => {
+  const p = {h: r.pick([100, 120, 150, 200]), c: r.pick([50, 60]), S0: r.pick([1500, 1800, 2000]), E: r.pick([600, 800, 1000]), n: r.pick([5, 8, 10]), d0: r.pick([50, 60, 80]),
+    B: r.pick([600, 800, 1000]), rate: r.pick([2, 3]), R: r.pick([100, 150, 200]), SAL: r.pick([400, 500, 600]), RENT: r.pick([120, 180, 240]), V: r.pick([30, 50, 80]),
+    C0: r.pick([200, 300, 400]), AR0: r.pick([100, 150]), I0: r.pick([80, 100, 120, 150]), F0: r.pick([500, 600]), AP0: r.pick([60, 80, 100]), D0: r.pick([300, 400]), K: r.pick([400, 500])};
+  return Object.assign(p, bossYear(p));
+}, p => p.ok, 3000);
+
 /* ---------- 章の定義 ---------- */
 Game.chapter({
   id: 'ch2', no: 2, title: '財務3表',
   region: {name: '港の倉庫街', scene: 'warehouse'},
   intro: '商店街のスタンドは繁盛し、郷田から倉庫街のレンガ倉庫を焙煎所にしないかと持ちかけられた。店が大きくなれば、どんぶり勘定では回らない。経理のルカを迎え、帳簿のつけ方と3つの決算書（BS・PL・CF）を身につける章。',
-  pending: '第2章の続き（掛け取引と在庫、減価償却、間接法、黒字倒産、大型案件「大口受注の1年」）は準備中です。',
 
   skills: [
     {id: 'ch2.s.three', name: '3つの表（BS・PL・CF）の役割を区別できる', item: 'binder'},
@@ -4093,6 +4295,12 @@ Game.chapter({
     {id: 'ch2.s.cf', name: '現金の動きをCFの3区分に分けられる', item: 'cart'},
     {id: 'ch2.s.journal', name: '基本の取引の仕訳を切れる', item: 'stamp'},
     {id: 'ch2.s.link', name: '3表のつながりを使って数字を確かめられる', item: 'ledger'},
+    {id: 'ch2.s.credit', name: '掛け取引で、売上と現金のずれを記録できる', item: 'invoice'},
+    {id: 'ch2.s.cogs', name: '在庫から売上原価を計算できる', item: 'beans'},
+    {id: 'ch2.s.dep', name: '減価償却費と帳簿価額を計算できる', item: 'roaster2'},
+    {id: 'ch2.s.nonexp', name: '支出と費用、収入と収益のずれを見分けられる', item: 'chest'},
+    {id: 'ch2.s.indirect', name: '間接法で営業CFを組み立てられる', item: 'abacus'},
+    {id: 'ch2.s.wc', name: '運転資本と資金繰りから、黒字倒産の危険を見抜ける', item: 'calendar'},
   ],
 
   glossary: [
@@ -4126,6 +4334,25 @@ Game.chapter({
     {id: '勘定科目', desc: '現金、借入金、売上高など、記録に使う項目の名前。'},
     {id: '総勘定元帳', desc: '仕訳を勘定科目ごとに書き写して集計する帳簿。T字の形で書くのでT勘定とも呼ぶ。'},
     {id: '試算表', desc: 'すべての勘定科目の残高を1枚に並べた表。借方の合計と貸方の合計は必ず一致する。'},
+    {id: '掛け取引', yomi: 'かけとりひき', desc: '商品を先に渡し（受け取り）、代金は後で受け払いする取引。売る側には売掛金、買う側には買掛金が生まれる。会社どうしの取引では、これがふつう。'},
+    {id: '在庫（棚卸資産）', yomi: 'ざいこ（たなおろししさん）', desc: '売るために持っている商品・原材料。売れるまではBSの資産（商品）で、売れた分だけがPLの売上原価になる。'},
+    {id: '棚卸', yomi: 'たなおろし', desc: '期末に在庫を実際に数えて、量と金額を確かめる作業。売上原価を計算する出発点になる。'},
+    {id: '売上原価の計算', desc: '期首の在庫 ＋ 当期の仕入 − 期末の在庫 ＝ 売上原価。仕入れた額ではなく、売れた分だけが費用になる。'},
+    {id: '減価償却', yomi: 'げんかしょうきゃく', desc: '長く使う設備の購入額を、使う年数に分けて少しずつ費用にすること。現金は買ったときに出ていて、償却するときには出ていかない。'},
+    {id: '耐用年数', yomi: 'たいようねんすう', desc: '設備を何年使えるかの見積もり。減価償却を何年に分けるかを決める。'},
+    {id: '定額法', desc: '毎年同じ額を減価償却する方法。（取得原価 − 残存価額）÷ 耐用年数。'},
+    {id: '取得原価', desc: '設備などを手に入れるのにかかった金額。購入代金に、運搬や据え付けの費用も含める。'},
+    {id: '残存価額', yomi: 'ざんぞんかがく', desc: '耐用年数を使い終えたときに残ると見込む価値。日本では今、残存価額を0（帳簿上は1円を残す）として計算することが多い。'},
+    {id: '帳簿価額', yomi: 'ちょうぼかがく', desc: 'BSに載っている資産の金額。設備なら、取得原価から減価償却の合計を引いた残り。売ったらいくらになるか（時価）とは別物。'},
+    {id: '減価償却累計額', desc: 'これまでに減価償却した額の合計。BSで、設備の取得原価の下にマイナスで並べ、差し引きで帳簿価額を示す書き方がある。'},
+    {id: '支出・費用', desc: '支出は現金が出ていくこと、費用は利益を減らすもの。設備の購入や借入の返済は支出だが費用ではない。減価償却費は費用だが支出ではない。'},
+    {id: '収入・収益', desc: '収入は現金が入ってくること、収益は利益を増やすもの。借入や出資は収入だが収益ではない。掛けの売上は収益だが、その時点では収入ではない。'},
+    {id: '直接法・間接法', desc: '営業CFの2つの書き方。直接法は入金と支払いを並べる。間接法は利益から出発し、現金とずれる部分（減価償却費、運転資本の増減など）を足し引きする。金額は同じになる。'},
+    {id: '運転資本', yomi: 'うんてんしほん', desc: '売掛金 ＋ 在庫 − 買掛金。商売を回すために寝ているお金。増えた年は、その分だけ営業CFが利益より少なくなる。'},
+    {id: '必要運転資金', desc: '商売の規模に応じて、運転資本として寝かせておく必要があるお金。売上が増えると、利益が入るより先に増える。'},
+    {id: '黒字倒産', yomi: 'くろじとうさん', desc: '利益は出ているのに、支払いに必要な現金が足りなくなって倒産すること。急成長や、代金の回収が遅い商売で起こりやすい。'},
+    {id: '資金繰り', yomi: 'しきんぐり', desc: '支払いの日に現金が足りるよう、入金と支払いのタイミングをやりくりすること。'},
+    {id: '資金繰り表', desc: '月ごとに、入金・支払い・月末の現金残高を並べた表。現金が足りなくなる月を、前もって見つけるための道具。'},
   ],
 
   myths: [
@@ -4135,6 +4362,14 @@ Game.chapter({
     {id: 'ch2.m.equipexpense', name: '設備を買ったら、その年の費用になる', desc: '設備の購入は、現金が「設備」という資産に形を変えるだけ。購入した瞬間には利益は減らない（使った分はあとで少しずつ費用にする）。'},
     {id: 'ch2.m.cfborrow', name: '借りて入った現金も、営業で稼いだ現金', desc: '借入や返済は財務CF。営業CFは本業の現金の出入りだけを表す。'},
     {id: 'ch2.m.karikata', name: '借方は「借りた側」、貸方は「貸した側」', desc: '借方・貸方はただの左右の呼び名。借入金（負債）が増えたら右の貸方に書く。'},
+    {id: 'ch2.m.salescash', name: '売れたら、その時点で現金が増える', desc: '掛けで売ると、売上と利益は売ったときに増えるが、現金は代金を受け取ったときに増える。その間は売掛金として残る。'},
+    {id: 'ch2.m.stockexpense', name: '仕入れた商品は、仕入れた年の費用になる', desc: '仕入れた商品は、売れるまで在庫（資産）。費用（売上原価）になるのは、売れた分だけ。'},
+    {id: 'ch2.m.depcash', name: '減価償却費の分だけ、現金が出ていく', desc: '減価償却費は現金が出ない費用。現金は設備を買ったときに、まとめて出ている（投資CF）。'},
+    {id: 'ch2.m.repayexpense', name: '借入の返済は費用になる', desc: '元本の返済は、借りたお金を返すだけで費用ではない。費用になるのは利息だけ。'},
+    {id: 'ch2.m.dividendexpense', name: '配当は費用なので、利益を減らす', desc: '配当は稼いだ利益を株主に分けること。PLの費用ではなく、BSの利益剰余金から直接減る。'},
+    {id: 'ch2.m.adddep', name: '間接法で減価償却費を足すのは、償却で現金が増えるから', desc: '減価償却費は、利益の計算では引かれたが、現金は出ていない。引きすぎた分を戻しているだけで、現金が増えるわけではない。'},
+    {id: 'ch2.m.arplus', name: '売掛金が増えた年は、営業CFも増える', desc: '売掛金は、売上に入ったのにまだ受け取っていない現金。増えた分だけ、営業CFは利益より少なくなる。'},
+    {id: 'ch2.m.growthcash', name: '売上が伸びれば、資金繰りは楽になる', desc: '代金の入金が後になる商売では、売上が伸びるほど入金前に払う額が増え、現金が足りなくなりやすい。'},
   ],
 
   cards: [
@@ -4143,6 +4378,12 @@ Game.chapter({
     {id: 'ch2.c.salesall', name: '現金で売る（3表）', open: {'現金': 300, '資本金': 300}, txn: () => Txn.sales(100), rows: ['売上高', '当期純利益', '現金', '利益剰余金', '営業CF']},
     {id: 'ch2.c.borrowall', name: 'お金を借りる（3表）', open: {'現金': 300, '資本金': 300}, txn: () => Txn.borrow(200), rows: ['当期純利益', '現金', '借入金', '財務CF']},
     {id: 'ch2.c.interestall', name: '利息を払う（3表）', open: {'現金': 500, '借入金': 300, '資本金': 200}, txn: () => Txn.interest(12), rows: ['当期純利益', '利益剰余金', '現金', '借入金', '営業CF']},
+    {id: 'ch2.c.salescredit', name: '掛けで売る（3表）', open: {'現金': 300, '資本金': 300}, txn: () => Txn.salesCredit(100), rows: ['売上高', '当期純利益', '現金', '売掛金', '営業CF']},
+    {id: 'ch2.c.collect', name: '売掛金を回収する', open: {'現金': 300, '売掛金': 200, '資本金': 500}, txn: () => Txn.collectAR(100), rows: ['売上高', '当期純利益', '現金', '売掛金', '営業CF']},
+    {id: 'ch2.c.payap', name: '買掛金を支払う', open: {'現金': 400, '商品': 100, '買掛金': 100, '資本金': 400}, txn: () => Txn.payAP(100), rows: ['当期純利益', '現金', '買掛金', '営業CF']},
+    {id: 'ch2.c.dep', name: '減価償却（3表）', open: {'現金': 300, '設備': 600, '資本金': 900}, txn: () => Txn.depreciate(100), rows: ['減価償却費', '当期純利益', '現金', '設備', '営業CF']},
+    {id: 'ch2.c.dividend', name: '配当を払う（3表）', open: {'現金': 500, '資本金': 300, '利益剰余金': 200}, txn: () => Txn.dividend(50), rows: ['当期純利益', '利益剰余金', '現金', '財務CF']},
+    {id: 'ch2.c.repay', name: '借入金を返す（3表）', open: {'現金': 500, '借入金': 300, '資本金': 200}, txn: () => Txn.repay(100), rows: ['当期純利益', '現金', '借入金', '財務CF']},
   ],
 
   rare: [
@@ -4152,6 +4393,12 @@ Game.chapter({
     {id: 'ch2.r.fcf', after: 'ch2.l4', who: 'fudosan', title: '3年分のフリーCF', q: 'ch2.q.r.fcf',
       intro: '不動産屋の社長です。取引先の会社、ここ3年ずっと黒字なのに、借入が増え続けていて。CFを見てもらえますか。',
       lesson: 'フリーCFがマイナス続きなら、足りない現金は借入や出資で埋めている。黒字でも借入が増える理由はここにある。'},
+    {id: 'ch2.r.inv', after: 'ch2.l7', who: 'sakana', title: '冷凍庫の棚卸', q: 'ch2.q.r.inv',
+      intro: '魚屋です。決算の前に冷凍庫を数え直したら、帳簿より在庫が少なくて……。これ、利益に響くんですか？',
+      lesson: '実際に数えた在庫が帳簿より少なければ、その分は売上原価（費用）に入り、利益が減る。棚卸は利益の検算でもある。'},
+    {id: 'ch2.r.kuroji', after: 'ch2.l11', who: 'yaoya', title: '売れているのに足りない', q: 'ch2.q.r.kuroji',
+      intro: '八百屋だよ。レストランへの卸が当たって、売上は倍になったの。なのに今月末、仕入先への支払いが足りないかもしれなくて……',
+      lesson: '売上が伸びた直後ほど、入金の前に払う仕入が大きくなる。月ごとの資金繰り表で、足りない月を先に見つける。'},
   ],
 
   lessons: [
@@ -4273,7 +4520,165 @@ Game.chapter({
       {q: 'ch2.q.l6.s3j'}, {q: 'ch2.q.l6.s3a'},
       {s: 'luka', t: '仕訳さえ正しければ、3つの表は自動的に正しく動く。逆に言えば、表の数字の裏には必ず仕訳があります。'},
     ]},
+  /* ---------- 7 ---------- */
+  {id: 'ch2.l7', title: '掛け取引と在庫', time: 12, scene: 'warehouse', cast: ['me', 'luka'], panel: ['all', 'bs', 'pl', 'cf'],
+    next: '次は減価償却。500万円の焙煎機は、買った年に500万円の費用になるのか。',
+    steps: [
+      {s: 'narr', t: '倉庫の焙煎所が動き出した。商店街の店頭販売に加えて、港の喫茶店やレストランへの卸売りが始まった。'},
+      {s: 'luka', terms: ['掛け取引'], t: '卸先との取引は「月末締め、翌月末払い」がふつうです。豆を渡した月には、代金をもらえません。代金を後で受け払いする取引を**掛け取引**といいます。'},
+      {s: 'luka', scene: 'office', t: '掛けで売ったら、売ったときに売上を計上し、まだ受け取っていない代金を**売掛金**にします。そのとき3つの表はどう動くでしょう。'},
+      {q: 'ch2.q.l7.ar'},
+      {s: 'luka', t: '翌月末、喫茶店から代金が振り込まれました。'},
+      {q: 'ch2.q.l7.collect'},
+      {s: 'luka', t: '利益は売った月に、現金は入金の月に増える。掛け取引では、同じ売上がPLとCFに違う月で顔を出します。'},
+      {s: 'luka', t: '仕入れも掛けが基本です。生豆を受け取って、代金は翌月払い。まだ払っていない分が**買掛金**でしたね。'},
+      {q: 'ch2.q.l7.jbuy'},
+      {q: 'ch2.q.l7.payap'},
+      {s: 'luka', terms: ['在庫（棚卸資産）'], t: '仕入れた生豆は、売れるまで倉庫で待つ**在庫**です。BSでは「商品」の行。売れた分だけが、PLの**売上原価**になります。'},
+      {d: 'table', s: 'luka', terms: ['棚卸', '売上原価の計算'], t: '売上原価は、在庫の数字から逆算します。',
+        data: {head: ['', '金額（例）'], rows: [['期首の在庫', '120'], ['＋ 当期の仕入', '800'], ['− 期末の在庫', '150'], ['＝ 売上原価', '770']], note: '期末に倉庫の在庫を実際に数える作業を**棚卸**という。「あった分＋入れた分−残った分＝売れた分」。'}},
+      {q: 'ch2.q.l7.cogs'},
+      {q: 'ch2.q.l7.sell'},
+      {q: 'ch2.q.l7.fill'},
+      {s: 'luka', t: '在庫を数え間違えると、利益はどうなるでしょう。'},
+      {q: 'ch2.q.l7.miscount'},
+      {q: 'ch2.q.l7.sort'},
+      {s: 'luka', t: '売掛金・在庫・買掛金。商売を回していると、いつもどこかにお金が寝ています。この話は「運転資本」として、もう一度出てきます。'},
+    ]},
+  /* ---------- 8 ---------- */
+  {id: 'ch2.l8', title: '減価償却', time: 12, scene: 'office', cast: ['me', 'luka'], panel: ['pl', 'bs', 'cf'],
+    next: '次は、ここまでの「ずれ」の整理。現金は出ていくのに、費用にならない支出がある。',
+    steps: [
+      {s: 'me', t: '卸売りが増えて、焙煎機をもう1台買いたい。でも500万円もする。今年の利益が500万円も減ったら、赤字になってしまう……'},
+      {s: 'luka', t: '試しに、買った年に全額を費用にしたらどうなるか、予想してみましょう。'},
+      {q: 'ch2.q.l8.whole'},
+      {s: 'luka', terms: ['減価償却', '耐用年数'], t: '焙煎機は何年も使って稼ぎます。だから代金は、使う年数に分けて少しずつ費用にします。これが**減価償却**。何年使えるかの見積もりを**耐用年数**といいます。'},
+      {s: 'luka', terms: ['定額法', '取得原価', '残存価額'], t: '毎年同じ額を費用にするのが**定額法**。（**取得原価** − 使い終えたときに残る価値＝**残存価額**）÷ 耐用年数、で計算します。'},
+      {d: 'table', s: 'luka', t: '500万円・5年・残存価額0の焙煎機。本業の稼ぎ（焙煎機の費用を除く）は毎年300万円とします。',
+        data: {head: ['', '1年目', '2年目', '3年目', '4年目', '5年目'], rows: [['全額をすぐ費用に', '500', '0', '0', '0', '0'], ['→ 営業利益', '−200', '300', '300', '300', '300'], ['減価償却（定額法）', '100', '100', '100', '100', '100'], ['→ 営業利益', '200', '200', '200', '200', '200']], note: '5年の費用の合計はどちらも500で同じ。減価償却なら、毎年の実力がそのまま見える。'}},
+      {q: 'ch2.q.l8.sl'},
+      {s: 'luka', terms: ['帳簿価額'], t: 'BSの設備の金額は、取得原価から毎年の減価償却費を引いていきます。残った金額を**帳簿価額**といいます。'},
+      {q: 'ch2.q.l8.book'},
+      {q: 'ch2.q.l8.arr'},
+      {s: 'luka', t: '減価償却費は、**現金が出ていかない費用**です。現金は、焙煎機を買ったときに投資CFでまとめて出ています。'},
+      {q: 'ch2.q.l8.cfyear'},
+      {q: 'ch2.q.l8.total'},
+      {q: 'ch2.q.l8.fill'},
+      {s: 'luka', t: '耐用年数は、会社が決める見積もりです。見積もりが変わると、何が変わるでしょう。'},
+      {q: 'ch2.q.l8.judge'},
+      {s: 'luka', terms: ['減価償却累計額'], t: '実際の決算書では、設備を取得原価のまま載せ、これまでの償却の合計（**減価償却累計額**）をマイナスで並べる書き方もよく使われます。差し引きが帳簿価額です。'},
+    ]},
+  /* ---------- 9 ---------- */
+  {id: 'ch2.l9', title: '費用にならない支出', time: 11, scene: 'office', cast: ['me', 'luka'], panel: ['all', 'pl', 'bs', 'cf'],
+    next: '次は間接法。利益から出発して、営業CFを組み立てる。',
+    steps: [
+      {s: 'luka', t: 'ここまでで、現金の動きとPLの数字がずれる場面がいくつも出てきました。まずは予想から。'},
+      {q: 'ch2.q.l9.predict'},
+      {s: 'luka', terms: ['支出・費用', '収入・収益'], t: 'お金が出ていくことを**支出**、利益を減らすものを**費用**と呼び分けます。入ってくるほうは**収入**と**収益**。似た言葉ですが、別物です。'},
+      {d: 'compare', s: 'luka', t: 'ずれは4つの型に分けられます。',
+        data: {cols: ['例', 'ずれる理由'], rows: [['支出だが費用ではない', '設備の購入、借入の返済、配当、売れ残った商品の仕入れ', '資産に形を変えた／借りたものを返した／利益を分けた'], ['費用だが支出ではない', '減価償却費', '現金は設備を買ったときに出ている'], ['収入だが収益ではない', '借入、出資、売掛金の回収', '返す約束のお金／元手／売上は計上済み'], ['収益だが収入ではない', '掛けの売上', '代金はまだ受け取っていない']]}},
+      {q: 'ch2.q.l9.sort'},
+      {q: 'ch2.q.l9.div'},
+      {q: 'ch2.q.l9.repay'},
+      {q: 'ch2.q.l9.sortin'},
+      {s: 'luka', t: 'この区別ができると、払った現金のうち、どれが利益を減らしたのかが分かります。'},
+      {q: 'ch2.q.l9.calc'},
+      {s: 'luka', t: '逆向きにも使えます。利益から出発して、ずれを足し引きすれば、現金の増減が出ます。'},
+      {q: 'ch2.q.l9.cash'},
+      {q: 'ch2.q.l9.neg'},
+      {s: 'luka', t: '利益から出発して、ずれを足し引きして現金を出す。これを営業CFでやるのが、次の「間接法」です。'},
+    ]},
+  /* ---------- 10 ---------- */
+  {id: 'ch2.l10', title: '間接法と運転資本', time: 12, scene: 'office', cast: ['me', 'luka'], panel: ['cf', 'pl', 'bs'],
+    next: '次は、黒字なのに会社が潰れる話。運転資本が牙をむく。',
+    steps: [
+      {s: 'luka', terms: ['直接法・間接法'], t: '営業CFには2つの書き方があります。**直接法**は、入金と支払いを1つずつ並べる書き方（4回目のやり方）。**間接法**は、当期純利益から出発して、現金とずれる部分を足し引きする書き方です。'},
+      {s: 'luka', t: '日本の会社の決算書は、ほとんどが間接法で書かれています。利益と現金がなぜずれたのかが、一目で分かるからです。'},
+      {q: 'ch2.q.l10.direct'},
+      {s: 'luka', t: 'ずれの1つ目は、現金が出ない費用。代表は減価償却費です。'},
+      {q: 'ch2.q.l10.why'},
+      {d: 'table', s: 'luka', t: 'ずれの2つ目は、売掛金・在庫・買掛金の増減です。',
+        data: {head: ['BSの項目', '増えたら', '減ったら', '理由'], rows: [['売掛金', '引く', '足す', '売上（利益）には入ったが、現金はまだ'], ['在庫（商品）', '引く', '足す', '現金で仕入れたが、まだ費用になっていない'], ['買掛金', '足す', '引く', '費用（原価）にはなったが、現金はまだ払っていない']], note: '資産が増えたら引き、負債が増えたら足す。'}},
+      {q: 'ch2.q.l10.sort'},
+      {s: 'luka', terms: ['運転資本'], t: '売掛金＋在庫−買掛金を**運転資本**といいます。商売を回すために寝ているお金です。'},
+      {q: 'ch2.q.l10.wc'},
+      {q: 'ch2.q.l10.wcdir'},
+      {s: 'luka', t: 'では、間接法で営業CFを組み立てましょう。'},
+      {q: 'ch2.q.l10.fill'},
+      {q: 'ch2.q.l10.bs'},
+      {s: 'luka', t: '実際の日本の決算書では、税引前当期純利益から始めて、法人税等の支払いを後でまとめて引く形がふつうです。足し引きの考え方は同じ。他社の決算書を読むとき、必ず出てきます。'},
+    ]},
+  /* ---------- 11 ---------- */
+  {id: 'ch2.l11', title: '黒字倒産', time: 13, scene: 'warehouse', cast: ['me', 'luka'], panel: ['cf', 'pl', 'bs'],
+    ctx: r => ({k: kuroji(r)}),
+    next: '大型案件。汐見グランドホテルから、1年分の大口注文の話が来る。',
+    steps: [
+      {s: 'narr', t: '港で噂を聞いた。隣町で急成長していた焙煎会社が、資金が回らずに倒産したという。決算はずっと黒字だったらしい。'},
+      {s: 'luka', terms: ['黒字倒産', '資金繰り'], t: '会社が潰れるのは、赤字のときではありません。払うべき日に払う現金がないときです。黒字なのにそうなることを**黒字倒産**、日々の現金のやりくりを**資金繰り**といいます。'},
+      {s: 'luka', scene: 'office', t: 'その会社の数字を、簡単にして再現してみましょう。毎月の売上は伸び、毎月の利益はずっと黒字です。'},
+      {q: 'ch2.q.l11.est'},
+      {s: 'luka', terms: ['資金繰り表'], t: '月ごとに、入金・支払い・月末の現金を並べた表を**資金繰り表**といいます。最初の3か月を作ってみましょう。'},
+      {q: 'ch2.q.l11.table'},
+      {d: 'cashline', s: 'luka', t: '6か月分を並べるとこうなります。利益の累計（緑）は増え続けるのに、現金は途中でマイナスに沈み、6か月目になっても戻りません。', data: c => ({months: kurojiMonths(c.k)})},
+      {q: 'ch2.q.l11.ar'},
+      {s: 'luka', t: '利益は消えたのではなく、まだ入金されていない売掛金に化けています。前回の言葉でいえば、運転資本が現金を吸い込んだのです。'},
+      {q: 'ch2.q.l11.judge'},
+      {s: 'luka', terms: ['必要運転資金'], t: '商売の規模に応じて寝かせておく必要があるお金を**必要運転資金**といいます。売上が増えると、利益が入るより先にこれが増えます。'},
+      {q: 'ch2.q.l11.need'},
+      {s: 'luka', t: '黒字倒産を防ぐ手は、入金を早める・支払いを遅らせる・在庫を減らす・前もって資金を用意する、の4つにまとまります。'},
+      {q: 'ch2.q.l11.sort'},
+      {q: 'ch2.q.l11.plan'},
+      {s: 'luka', t: 'うれしい大口の注文ほど、資金繰りは危うくなる。今日の話を覚えておいてください。'},
+    ]},
   ],
+
+  /* ---------- 大型案件 ---------- */
+  boss: {id: 'ch2.boss', title: '大口受注の1年', scene: 'hotel', cast: ['me', 'ayase'], hp: 4, stage: 2, time: 15, panel: ['bs', 'pl', 'cf'],
+    ctx: r => ({p: bossPlan(r)}),
+    next: '総合テストで第2章をしめくくろう。その先は駅前オフィス街。他社の決算書を読み解く旅が始まる。',
+    steps: [
+      {s: 'narr', t: '汐見グランドホテルのロビー。購買部長の綾瀬が、契約書を手に待っていた。'},
+      {s: 'ayase', t: c => `来月から1年間、レストランと全客室のコーヒー豆を{company}にお任せしたいのです。毎月${f(c.p.h)}万円分（売値）を納品してください。お支払いは、納品の2か月後になります。`},
+      {s: 'me', t: '大口の注文だ。ただ、代金は2か月後……。港で聞いた黒字倒産の話が頭をよぎる。'},
+      {q: 'ch2.q.b.journal'},
+      {q: 'ch2.q.b.arrows'},
+      {s: 'luka', scene: 'office', cast: ['me', 'luka'], t: c => `この量を焼くには、焙煎機がもう1台要ります。${f(c.p.E)}万円。代金は信用金庫から${f(c.p.B)}万円を借りてまかないましょう。`},
+      {q: 'ch2.q.b.dep'},
+      {s: 'narr', cast: ['me', 'luka', 'goda'], t: '1年後。決算の時期が来た。郷田が数字を確かめに、倉庫の2階へやってきた。'},
+      {s: 'goda', t: 'ホテルとの取引、順調だったようですね。まず、今年の支払いを整理しましょう。'},
+      {q: 'ch2.q.b.nonexp'},
+      {s: 'goda', t: '次に、1年分のPLを見せてください。'},
+      {q: 'ch2.q.b.pl'},
+      {s: 'goda', t: c => `当期純利益は${f(c.p.NI)}万円。では現金は？　営業CFを間接法で組み立ててください。`},
+      {q: 'ch2.q.b.indirect'},
+      {q: 'ch2.q.b.cash'},
+      {s: 'goda', t: c => `利益${f(c.p.NI)}万円に対して、ホテルの売掛金が${f(c.p.dAR)}万円たまっています。そして綾瀬さんから、来期は注文を倍にしたいと聞きました。`},
+      {q: 'ch2.q.b.need'},
+      {q: 'ch2.q.b.plan'},
+      {s: 'mina', cast: ['me', 'mina', 'goda'], t: c => `私からも1つ。今年の利益から、配当を${f(c.p.V)}万円いただけるかしら。`},
+      {q: 'ch2.q.b.div'},
+      {q: 'ch2.q.b.re'},
+      {s: 'goda', fx: 'sparkle:goda', t: c => `数字の筋が通っています。来期に向けて、運転資金${f(c.p.dAR + c.p.dInv - c.p.dAP)}万円分の借入の枠を用意しましょう。`},
+      {s: 'ayase', scene: 'hotel', cast: ['me', 'ayase'], fx: 'jump:ayase', t: '来期もよろしくお願いします。ロビーのコーヒー、お客様にとても評判なんですよ。'},
+      {s: 'narr', scene: 'warehouse', cast: ['me', 'luka'], t: '倉庫街の焙煎所に、2台目の焙煎機の煙が上がった。{company}は、港の倉庫街でいちばん忙しい焙煎所になった。'},
+    ]},
+
+  /* ---------- 総合テスト（大型案件のあと） ---------- */
+  exam: {id: 'ch2.exam', title: '第2章 総合テスト', scene: 'office', cast: ['me', 'luka'], n: 16, pass: .8, panel: ['bs', 'pl', 'cf'],
+    intro: '第2章のまとめの試験です。3表の形から黒字倒産まで、課題ごとに少なくとも1問。ヒントはなし、その場のやり直しもなし。間違えた問題は明日の復習に回ります。',
+    next: '第2章はここまで。次の地域は駅前オフィス街。自分の会社ではなく、他社の決算書を読み解く旅になる。',
+    pool: ['ch2.q.l1.profitcash', 'ch2.q.l1.stockflow', 'ch2.q.l1.sort', 'ch2.q.l1.which',
+      'ch2.q.l2.sortA', 'ch2.q.l2.sortR', 'ch2.q.l2.fill', 'ch2.q.l2.equitycash',
+      'ch2.q.l3.sort', 'ch2.q.l3.order', 'ch2.q.l3.fill', 'ch2.q.l3.arrows', 'ch2.q.l3.judge',
+      'ch2.q.l4.sort', 'ch2.q.l4.calc', 'ch2.q.l4.fcf', 'ch2.q.l4.pattern', 'ch2.q.l4.opneg',
+      'ch2.q.l5.rule', 'ch2.q.l5.j1', 'ch2.q.l5.j3', 'ch2.q.l5.j5', 'ch2.q.l5.read',
+      'ch2.q.l6.tacct', 'ch2.q.l6.trial', 'ch2.q.l6.re', 'ch2.q.l6.mismatch',
+      'ch2.q.l7.ar', 'ch2.q.l7.collect', 'ch2.q.l7.jbuy', 'ch2.q.l7.payap', 'ch2.q.l7.sort',
+      'ch2.q.l7.cogs', 'ch2.q.l7.sell', 'ch2.q.l7.fill', 'ch2.q.l7.miscount',
+      'ch2.q.l8.sl', 'ch2.q.l8.book', 'ch2.q.l8.arr', 'ch2.q.l8.cfyear', 'ch2.q.l8.fill', 'ch2.q.l8.judge',
+      'ch2.q.l9.sort', 'ch2.q.l9.div', 'ch2.q.l9.repay', 'ch2.q.l9.sortin', 'ch2.q.l9.calc', 'ch2.q.l9.cash',
+      'ch2.q.l10.why', 'ch2.q.l10.sort', 'ch2.q.l10.fill', 'ch2.q.l10.bs',
+      'ch2.q.l10.wc', 'ch2.q.l10.wcdir', 'ch2.q.l11.judge', 'ch2.q.l11.need', 'ch2.q.l11.sort', 'ch2.q.l11.plan']},
 
   questions: {
   /* ===== 1. 3つの表の役割 ===== */
@@ -4548,6 +4953,363 @@ Game.chapter({
     label: {'当期純利益': '当期純利益（PL）', '利益剰余金': '利益剰余金（BS）', '現金': '現金（BS）', '借入金': '借入金（BS）', '営業CF': '営業CF（CF）'},
     traps: [{when: a => a[3] === -1, why: '利息を払っても借入金（元本）は減らない。'}],
     explain: '費用（支払利息）がPLの利益を減らし、BSの利益剰余金も減る。現金の支払いは営業CFに入れる。'},
+
+  /* ===== 7. 掛け取引と在庫 ===== */
+  'ch2.q.l7.ar': {type: 'arrows', skill: 'ch2.s.credit', card: 'ch2.c.salescredit', show: ['x'],
+    gen: r => ({x: r.pick([80, 100, 150, 200])}),
+    text: p => `港の喫茶店に、豆${f(p.x)}万円分を掛けで売った（代金は翌月末。原価は考えない）。この時点で、次の数字はどう動く？`,
+    open: {'現金': 300, '資本金': 300}, txn: p => Txn.salesCredit(p.x), rows: ['売上高', '当期純利益', '現金', '売掛金', '営業CF'], label: lab3,
+    traps: [{when: a => a[2] === 1 || a[4] === 1, myth: 'ch2.m.salescash', why: '掛けで売ったので、代金はまだ受け取っていない。現金も営業CFも動かない。増えるのは売掛金（後で現金を受け取る権利）。'}],
+    explain: '売上と利益は「売ったとき」に増える。現金は「受け取ったとき」に増える。その間をつなぐのが売掛金。'},
+  'ch2.q.l7.collect': {type: 'arrows', skill: 'ch2.s.credit', card: 'ch2.c.collect', show: ['x'],
+    gen: r => ({x: r.pick([80, 100, 150, 200])}),
+    text: p => `翌月末、喫茶店から売掛金${f(p.x)}万円が振り込まれた。次の数字はどう動く？`,
+    open: p => ({'現金': 300, '売掛金': p.x + 100, '資本金': p.x + 400}), txn: p => Txn.collectAR(p.x), rows: ['売上高', '当期純利益', '現金', '売掛金', '営業CF'], label: lab3,
+    traps: [{when: a => a[0] === 1 || a[1] === 1, why: '売上と利益は、掛けで売ったときに計上済み。入金のときにもう一度数えると二重になる。'}],
+    explain: '回収では、売掛金という資産が現金という資産に形を変えるだけ。PLは動かず、現金の入りが営業CFに記録される。'},
+  'ch2.q.l7.jbuy': {type: 'journal', skill: 'ch2.s.credit', show: ['x'],
+    gen: r => ({x: r.pick([100, 150, 200, 300])}),
+    hint: '受け取った生豆は、売れるまで「商品」として持っておく。代金はまだ払っていない。',
+    text: p => `生豆${f(p.x)}万円分を仕入れた。代金は翌月末に払う約束（掛け）。仕訳は？`,
+    txn: p => Txn.buyStockCredit(p.x), extra: ['売上原価', '現金'],
+    traps: [{a: '売上原価', side: 'dr', myth: 'ch2.m.stockexpense', why: '仕入れた時点では、まだ1粒も売れていない。売れるまでは商品（資産）として置いておき、売れた分だけを売上原価にする。'}, {a: '現金', side: 'cr', why: '掛けで仕入れたので、現金はまだ出ていない。代わりに買掛金（後で払う義務）が増える。'}],
+    explain: '（借）商品 ／（貸）買掛金。資産（在庫）が増え、負債（買掛金）が増える。PLはまだ動かない。'},
+  'ch2.q.l7.payap': {type: 'arrows', skill: 'ch2.s.credit', card: 'ch2.c.payap', show: ['x'],
+    gen: r => ({x: r.pick([100, 150, 200])}),
+    text: p => `先月掛けで仕入れた生豆の代金${f(p.x)}万円を、現金で払った。次の数字はどう動く？`,
+    open: p => ({'現金': 400, '商品': p.x, '買掛金': p.x, '資本金': 400}), txn: p => Txn.payAP(p.x), rows: ['当期純利益', '現金', '買掛金', '営業CF'], label: lab3,
+    traps: [{when: a => a[0] === -1, why: '費用になるのは、仕入れた豆が売れたとき（売上原価）。代金の支払いは、後で払う約束（買掛金）を果たすだけで、利益は動かない。'}],
+    explain: '負債の買掛金が減り、現金が減る。PLは動かない。仕入代金の支払いは本業の支払いなので、営業CFのマイナスに入る。'},
+  'ch2.q.l7.cogs': {type: 'number', skill: 'ch2.s.cogs', unit: '万円', show: ['b', 'pu', 'e'],
+    gen: r => ({b: r.pick([80, 100, 120, 150]), pu: r.pick([600, 800, 900, 1200]), e: r.pick([90, 110, 140, 160])}),
+    hint: '期首にあった分と仕入れた分のうち、期末に残っていない分が売れた分。',
+    text: p => `期首に生豆の在庫が${f(p.b)}万円分あった。1年で${f(p.pu)}万円分を仕入れ、期末に倉庫を数えると${f(p.e)}万円分が残っていた。売上原価はいくら？`,
+    solve: p => p.b + p.pu - p.e,
+    traps: [{v: p => p.pu, myth: 'ch2.m.stockexpense', why: '仕入れた額がそのまま費用になるわけではない。期首の在庫を足し、売れ残った期末の在庫を引く。'}, {v: p => p.pu - p.e, why: '期首にあった在庫も、この1年で売れていく。足し忘れている。'}, {v: p => p.b + p.pu + p.e, why: '期末の在庫は売れ残った分。足すのではなく引く。'}],
+    explain: p => `${f(p.b)} ＋ ${f(p.pu)} − ${f(p.e)} = ${f(p.b + p.pu - p.e)}万円。「あった分＋入れた分−残った分＝売れた分」。`},
+  'ch2.q.l7.sell': {type: 'arrows', skill: 'ch2.s.cogs', show: ['x', 'c'],
+    gen: r => { const x = r.pick([100, 150, 200]); return {x, c: x * r.pick([50, 60]) / 100}; },
+    text: p => `仕入れ値${f(p.c)}万円分の豆を、${f(p.x)}万円で掛けで売った。次の数字はどう動く？`,
+    open: p => ({'現金': 200, '商品': p.c + 100, '資本金': p.c + 300}), txn: p => Txn.sellCredit(p.x, p.c), rows: ['売上高', '売上原価', '当期純利益', '商品', '売掛金', '現金'], label: lab3,
+    traps: [{when: a => a[3] === 0 || a[1] === 0, myth: 'ch2.m.stockexpense', why: '売れた豆は倉庫からなくなる。商品（在庫）が減り、その分が売上原価（費用）に移る。'}, {when: a => a[5] === 1, myth: 'ch2.m.salescash', why: '掛けで売ったので、現金はまだ入っていない。'}],
+    explain: p => `売上高 +${f(p.x)}、売上原価 +${f(p.c)}、利益は差し引き +${f(p.x - p.c)}。在庫（商品）が −${f(p.c)}、売掛金が +${f(p.x)}。売れた瞬間に、在庫が費用へ移る。`},
+  'ch2.q.l7.fill': {type: 'fill', skill: 'ch2.s.cogs', layout: 'list', unit: '万円',
+    gen: r => r.find(() => ({S: r.pick([1500, 2000, 2400]), b: r.pick([100, 120, 150]), pu: r.pick([700, 900, 1000]), e: r.pick([80, 130, 160])}), p => p.S - (p.b + p.pu - p.e) > 0),
+    text: 'PLの上の部分を、在庫の数字から組み立てよう。空欄に入る数字は？',
+    rows: p => [{label: '売上高', v: p.S}, {label: '期首の在庫', v: p.b}, {label: '＋ 当期の仕入', v: p.pu}, {label: '− 期末の在庫', v: p.e}, {label: '＝ 売上原価', v: p.b + p.pu - p.e, blank: true, total: true}, {label: '売上総利益', v: p.S - (p.b + p.pu - p.e), blank: true, total: true}],
+    explain: p => `売上原価 ${f(p.b)} ＋ ${f(p.pu)} − ${f(p.e)} = ${f(p.b + p.pu - p.e)}。売上総利益 ${f(p.S)} − ${f(p.b + p.pu - p.e)} = ${f(p.S - p.b - p.pu + p.e)}万円。`},
+  'ch2.q.l7.miscount': {type: 'judge', skill: 'ch2.s.cogs', show: ['d'],
+    gen: r => ({d: r.pick([20, 30, 50])}),
+    text: p => `棚卸で、期末の在庫を実際より${f(p.d)}万円多く数えてしまった（ほかの数字は正しい）。今年の売上総利益はどうなる？`,
+    concl: p => [ok(`実際より${f(p.d)}万円大きく出る`), {t: `実際より${f(p.d)}万円小さく出る`}, {t: '変わらない'}],
+    reasons: () => [ok('期末の在庫が多いほど、売上原価（期首＋仕入−期末）が小さくなるから'),
+      {t: '在庫はBSの資産なので、PLの利益には関係しないから', why: '期末の在庫は、売上原価の計算に入る。数え方ひとつで利益が動く。'},
+      {t: '仕入れた金額は変わらないので、費用も変わらないから', myth: 'ch2.m.stockexpense', why: '費用になるのは仕入れた額ではなく、売れた分（売上原価）。売れた分は在庫の数字から逆算される。'}],
+    explain: p => `期末の在庫が${f(p.d)}万円多い → 売上原価が${f(p.d)}万円小さい → 売上総利益が${f(p.d)}万円大きい。在庫の水増しは、利益を大きく見せる手口の典型でもある。だから監査では倉庫の在庫を実際に数える。`},
+  'ch2.q.l7.sort': {type: 'sort', skill: 'ch2.s.credit', bins: ['その時点で現金が動く', '現金はまだ動かない'], pick: 6,
+    text: '次の出来事のうち、その時点で現金が動くのは？',
+    items: () => [
+      {t: '豆を掛けで売った', bin: 1, myth: 'ch2.m.salescash', why: '掛けで売った時点では、代金はまだ受け取っていない。'},
+      {t: '生豆を掛けで仕入れた', bin: 1}, {t: '売れた豆の分を、在庫から売上原価に移した', bin: 1},
+      {t: '売掛金が振り込まれた', bin: 0}, {t: '買掛金を支払った', bin: 0}, {t: '店頭で豆を売り、代金を受け取った', bin: 0}, {t: '生豆を現金で仕入れた', bin: 0}],
+    explain: '掛けの売り買いと、在庫を原価に移す処理では現金は動かない。現金が動くのは、代金を受け取る・払うとき。'},
+
+  /* ===== 8. 減価償却 ===== */
+  'ch2.q.l8.whole': {type: 'estimate', skill: 'ch2.s.dep', unit: '万円', show: ['op', 'E'],
+    gen: r => ({op: r.pick([250, 300, 350]), E: r.pick([500, 600])}),
+    min: -500, max: 500, step: 50, tol: 50, start: 0,
+    text: p => `{company}の本業の稼ぎは、焙煎機の費用を除くと毎年${f(p.op)}万円で一定。1年目に焙煎機を${f(p.E)}万円で買い、5年使う。もし買った年に全額を費用にしたら、1年目の営業利益は？`,
+    solve: p => p.op - p.E,
+    surprise: p => `2〜5年目は焙煎機の費用がなくなり、営業利益は毎年${f(p.op)}万円。実力は毎年同じなのに、1年目だけ大赤字に見える。`,
+    explain: p => `${f(p.op)} − ${f(p.E)} = ${f(p.op - p.E)}万円。5年使う機械の代金を1年目だけに背負わせると、年ごとの成績が比べられなくなる。`},
+  'ch2.q.l8.sl': {type: 'number', skill: 'ch2.s.dep', unit: '万円', show: ['C', 'n', 'z'],
+    gen: r => r.find(() => ({C: r.pick([300, 400, 500, 600, 800]), n: r.pick([4, 5, 8, 10]), z: r.pick([0, 0, 40, 50, 100])}), p => U.isInt((p.C - p.z) / p.n) && p.z < p.C),
+    hint: '（取得原価 − 残存価額）÷ 耐用年数',
+    text: p => `焙煎機を${f(p.C)}万円で買った。耐用年数${p.n}年、残存価額${f(p.z)}万円、定額法。毎年の減価償却費はいくら？`,
+    solve: p => (p.C - p.z) / p.n,
+    traps: [{v: p => p.C / p.n, why: '使い終えたときに残る価値（残存価額）は費用にしない。先に取得原価から引く。'}, {v: p => p.C - p.z, why: 'それは耐用年数全体で費用にする合計。1年分は耐用年数で割る。'}],
+    explain: p => `（${f(p.C)} − ${f(p.z)}）÷ ${p.n} = ${f((p.C - p.z) / p.n)}万円。`},
+  'ch2.q.l8.book': {type: 'number', skill: 'ch2.s.dep', unit: '万円', show: ['C', 'n', 'k'],
+    gen: r => r.find(() => ({C: r.pick([400, 500, 600, 800, 1000]), n: r.pick([4, 5, 8, 10]), k: r.pick([1, 2, 3])}), p => U.isInt(p.C / p.n) && p.k < p.n),
+    text: p => `取得原価${f(p.C)}万円の焙煎機。耐用年数${p.n}年、残存価額0、定額法。${p.k}年分の減価償却が終わったとき、BSの設備（帳簿価額）はいくら？`,
+    solve: p => p.C - p.C / p.n * p.k,
+    traps: [{v: p => p.C / p.n * p.k, why: 'それは償却した合計（減価償却累計額）。帳簿価額は、取得原価からそれを引いた残り。'}, {v: p => p.C - p.C / p.n, why: '1年分しか引いていない。'}],
+    explain: p => `1年分は ${f(p.C)} ÷ ${p.n} = ${f(p.C / p.n)}万円。${p.k}年で ${f(p.C / p.n * p.k)}万円。帳簿価額は ${f(p.C)} − ${f(p.C / p.n * p.k)} = ${f(p.C - p.C / p.n * p.k)}万円。`},
+  'ch2.q.l8.arr': {type: 'arrows', skill: 'ch2.s.dep', card: 'ch2.c.dep', show: ['x'],
+    gen: r => ({x: r.pick([60, 80, 100, 120])}),
+    text: p => `決算で、焙煎機の1年分の減価償却費${f(p.x)}万円を計上した。次の数字はどう動く？`,
+    open: {'現金': 300, '設備': 600, '資本金': 900}, txn: p => Txn.depreciate(p.x), rows: ['減価償却費', '営業利益', '当期純利益', '現金', '設備', '営業CF'], label: lab3,
+    traps: [{when: a => a[3] === -1 || a[5] === -1, myth: 'ch2.m.depcash', why: '減価償却費は、現金が出ていかない費用。現金は焙煎機を買ったときに、もう出ている。'}],
+    explain: '費用（減価償却費）が増えて利益が減り、BSの設備（帳簿価額）が減る。現金とCFは動かない。'},
+  'ch2.q.l8.cfyear': {type: 'fill', skill: 'ch2.s.dep', layout: 'list', unit: '万円', show: ['C', 'n'],
+    gen: r => r.find(() => ({C: r.pick([400, 500, 600, 800]), n: r.pick([4, 5, 8, 10])}), p => U.isInt(p.C / p.n)),
+    text: p => `焙煎機を${f(p.C)}万円で買い、代金は現金で払った。耐用年数${p.n}年、残存価額0、定額法。買った年と翌年の、PLとCFの数字は？`,
+    rows: p => [{label: '1年目：PLの減価償却費', v: p.C / p.n, blank: true}, {label: '1年目：投資CFで出ていった現金', v: p.C, blank: true}, {label: '2年目：PLの減価償却費', v: p.C / p.n}, {label: '2年目：投資CFで出ていった現金', v: 0, blank: true}],
+    explain: p => `現金は1年目にまとめて${f(p.C)}万円出ていき（投資CF）、PLには毎年${f(p.C / p.n)}万円ずつ費用が載る。2年目以降、現金は出ていかないが費用は続く。`},
+  'ch2.q.l8.total': {type: 'estimate', skill: 'ch2.s.dep', unit: '万円', show: ['C', 'n'],
+    gen: r => r.find(() => ({C: r.pick([400, 500, 600, 800]), n: r.pick([4, 5, 8, 10])}), p => U.isInt(p.C / p.n)),
+    min: 0, max: p => p.C * 2, step: 50, tol: 0, start: 0,
+    text: p => `取得原価${f(p.C)}万円、耐用年数${p.n}年、残存価額0の設備を定額法で償却する。${p.n}年間に計上する減価償却費の合計は？`,
+    solve: p => p.C,
+    surprise: '合計は、買った金額とぴったり同じ。減価償却は費用を減らす技ではなく、費用を使う年に配るだけ。',
+    explain: p => `毎年${f(p.C / p.n)}万円 × ${p.n}年 = ${f(p.C)}万円。`},
+  'ch2.q.l8.fill': {type: 'fill', skill: 'ch2.s.dep', layout: 'list', unit: '万円',
+    gen: r => r.find(() => ({S: r.pick([2000, 2400, 3000]), C: r.pick([900, 1100, 1300]), G: r.pick([400, 500, 600]), R: r.pick([120, 180, 240]), D: r.pick([60, 80, 100, 120])}), p => p.S - p.C - p.G - p.R - p.D > 0),
+    text: '減価償却費の入ったPL。空欄に入る数字は？',
+    rows: p => [{label: '売上高', v: p.S}, {label: '売上原価', v: p.C}, {label: '売上総利益', v: p.S - p.C, blank: true, total: true}, {label: '給料', v: p.G}, {label: '家賃', v: p.R}, {label: '減価償却費', v: p.D}, {label: '営業利益', v: p.S - p.C - p.G - p.R - p.D, blank: true, total: true}],
+    explain: p => `販管費は 給料${f(p.G)} ＋ 家賃${f(p.R)} ＋ 減価償却費${f(p.D)} = ${f(p.G + p.R + p.D)}。営業利益は ${f(p.S - p.C)} − ${f(p.G + p.R + p.D)} = ${f(p.S - p.C - p.G - p.R - p.D)}万円。店の設備の減価償却費は販管費の1つ（工場の機械なら売上原価に入る）。`},
+  'ch2.q.l8.judge': {type: 'judge', skill: 'ch2.s.dep', show: ['C'],
+    gen: r => ({C: r.pick([500, 600, 800, 1000])}),
+    text: p => `A社とB社は、同じ焙煎機（${f(p.C)}万円）を同じ日に現金で買い、まったく同じ商売をしている。A社は耐用年数5年、B社は10年で償却する（残存価額0）。税金は考えない。1年目の終わりに、手元の現金が多いのは？`,
+    concl: () => [ok('同じ'), {t: 'A社'}, {t: 'B社'}],
+    reasons: () => [ok('耐用年数の見積もりで変わるのは利益だけ。減価償却費は現金が出ていかない費用だから'),
+      {t: '減価償却費が少ないB社のほうが、出ていく現金が少ないから', myth: 'ch2.m.depcash', why: '減価償却費は現金が出ない費用。費用の大小と、現金の出入りは関係しない。'},
+      {t: '費用を多く計上したA社は、そのぶん節約できたから', why: '計上する費用を増やしても、払う現金は変わらない（税金を除く）。'}],
+    explain: p => `1年目の減価償却費は A社${f(p.C / 5)}万円、B社${f(p.C / 10)}万円。利益はB社が${f(p.C / 5 - p.C / 10)}万円多く見えるが、現金は同じ。なお税金まで考えると、費用の多いA社は税金が少なく済み、そのぶん現金が残る。`},
+
+  /* ===== 9. 費用にならない支出 ===== */
+  'ch2.q.l9.predict': {type: 'choice', skill: 'ch2.s.nonexp', show: ['ni', 'd'],
+    gen: r => ({ni: r.pick([150, 200, 300]), d: r.pick([100, 150, 250])}),
+    text: p => `{company}の今年の当期純利益は${f(p.ni)}万円（黒字）。ところが現金は1年で${f(p.d)}万円減った。何かの間違い？`,
+    options: () => [ok('間違いとは限らない。焙煎機の購入や借入の返済のように、費用にならない支出があればこうなる'),
+      {t: '間違い。黒字なら、現金は少なくとも利益の分だけ増える', myth: 'ch2.m.profitcash', why: '利益は収益と費用の差。現金の出入りには、費用にならない支出（設備の購入、返済、配当など）も含まれる。'},
+      {t: '利益の分は利益剰余金として金庫に入っているので、現金が減ることはない', myth: 'ch2.m.equitycash', why: '利益剰余金はBSの右側（お金の出どころ）の記録。現金の量ではない。'}],
+    explain: '利益が出た年でも、その現金で設備を買ったり借金を返したりすれば、現金は減る。今回はこの「ずれ」を整理する。'},
+  'ch2.q.l9.sort': {type: 'sort', skill: 'ch2.s.nonexp', bins: ['支出だが費用ではない', '費用だが支出ではない', '支出であり費用でもある'], pick: 6,
+    text: '次のものは、どれに当たる？（支出＝現金が出ていく、費用＝利益を減らす）',
+    items: () => [
+      {t: '焙煎機の購入代金', bin: 0, myth: 'ch2.m.equipexpense', why: '設備の購入は、現金が設備（資産）に形を変えるだけ。費用は減価償却で後から少しずつ計上する。'},
+      {t: '借入金の元本の返済', bin: 0, myth: 'ch2.m.repayexpense', why: '返済は、借りたお金を返すだけ。費用になるのは利息だけ。'},
+      {t: '株主への配当', bin: 0, myth: 'ch2.m.dividendexpense', why: '配当は利益の分配。PLの費用ではなく、利益剰余金から直接減る。'},
+      {t: '生豆を現金で仕入れ、期末まで売れ残った分', bin: 0, myth: 'ch2.m.stockexpense', why: '売れ残った分は在庫（資産）。費用になるのは売れたとき。'},
+      {t: '焙煎機の減価償却費', bin: 1, myth: 'ch2.m.depcash', why: '減価償却費は現金が出ない費用。現金は買ったときに出ている。'},
+      {t: '給料の支払い', bin: 2}, {t: '借入金の利息の支払い', bin: 2}, {t: '家賃の支払い', bin: 2}],
+    explain: '設備の購入・返済・配当・売れ残りの仕入れは「支出だが費用ではない」。減価償却費は「費用だが支出ではない」。給料・家賃・利息はその両方。'},
+  'ch2.q.l9.div': {type: 'arrows', skill: 'ch2.s.nonexp', card: 'ch2.c.dividend', show: ['x'],
+    gen: r => ({x: r.pick([30, 50, 80])}),
+    text: p => `株主に配当${f(p.x)}万円を現金で払った。次の数字はどう動く？`,
+    open: {'現金': 500, '資本金': 300, '利益剰余金': 200}, txn: p => Txn.dividend(p.x), rows: ['当期純利益', '利益剰余金', '現金', '財務CF'], label: lab3,
+    traps: [{when: a => a[0] === -1, myth: 'ch2.m.dividendexpense', why: '配当は費用ではないので、PLの当期純利益は変わらない。稼いだ利益の積み立て（利益剰余金）から直接減る。'}],
+    explain: 'PLは動かず、BSの利益剰余金と現金が減る。お金を株主に返す動きなので、CFでは財務CFのマイナス。'},
+  'ch2.q.l9.repay': {type: 'arrows', skill: 'ch2.s.nonexp', card: 'ch2.c.repay', show: ['x'],
+    gen: r => ({x: r.pick([50, 100, 150])}),
+    text: p => `借入金の元本${f(p.x)}万円を、現金で返した（利息は別）。次の数字はどう動く？`,
+    open: {'現金': 500, '借入金': 300, '資本金': 200}, txn: p => Txn.repay(p.x), rows: ['当期純利益', '現金', '借入金', '財務CF'], label: lab3,
+    traps: [{when: a => a[0] === -1, myth: 'ch2.m.repayexpense', why: '元本の返済は費用ではない。借りたお金（負債）を返すだけなので、PLは動かない。'}],
+    explain: '現金と借入金が同じだけ減る。PLは動かない。CFでは財務CFのマイナス。'},
+  'ch2.q.l9.sortin': {type: 'sort', skill: 'ch2.s.nonexp', bins: ['収入だが収益ではない', '収益だが収入ではない', '収入であり収益でもある'], pick: 5,
+    text: '入ってくる側も整理しよう。次のものは、どれに当たる？（収入＝現金が入る、収益＝利益を増やす）',
+    items: () => [
+      {t: '信用金庫からの借入', bin: 0, why: '借りたお金は返す義務がある（負債）。利益は増えない。'},
+      {t: '株主からの出資', bin: 0, why: '出資は元手（資本金）。稼ぎではない。'},
+      {t: '売掛金の回収', bin: 0, why: '売上は掛けで売ったときに計上済み。回収では現金が入るだけ。'},
+      {t: '豆を掛けで売った', bin: 1, myth: 'ch2.m.salescash', why: '売上（収益）は立つが、代金はまだ入っていない。'},
+      {t: '店頭で豆を現金で売った', bin: 2}, {t: '預金の利息を受け取った', bin: 2}],
+    explain: '借入・出資・売掛金の回収は「収入だが収益ではない」。掛けの売上は「収益だが、その時点では収入ではない」。'},
+  'ch2.q.l9.calc': {type: 'number', skill: 'ch2.s.nonexp', unit: '万円', show: ['a', 'b', 'c', 'd', 'e'],
+    gen: r => ({a: r.pick([300, 400, 500]), b: r.pick([120, 180, 240]), c: r.pick([200, 300, 500]), d: r.pick([50, 100, 150]), e: r.pick([20, 30, 50])}),
+    text: p => `今年、現金で払ったもの：給料${f(p.a)}万円、家賃${f(p.b)}万円、焙煎機の購入${f(p.c)}万円、借入金の元本の返済${f(p.d)}万円、配当${f(p.e)}万円。このうち、今年のPLの費用になるのは合計いくら？`,
+    solve: p => p.a + p.b,
+    traps: [{v: p => p.a + p.b + p.c + p.d + p.e, why: '払った現金の合計ではない。焙煎機・返済・配当は、費用にならない支出。'}, {v: p => p.a + p.b + p.c, myth: 'ch2.m.equipexpense', why: '焙煎機の購入代金は、買った年の費用にはならない（減価償却で少しずつ）。'}, {v: p => p.a + p.b + p.d, myth: 'ch2.m.repayexpense', why: '元本の返済は費用ではない。'}, {v: p => p.a + p.b + p.e, myth: 'ch2.m.dividendexpense', why: '配当は費用ではない。'}],
+    explain: p => `費用になるのは給料と家賃だけ：${f(p.a)} ＋ ${f(p.b)} = ${f(p.a + p.b)}万円。残りの${f(p.c + p.d + p.e)}万円は、現金は出ていくが費用にならない支出。`},
+  'ch2.q.l9.cash': {type: 'number', skill: 'ch2.s.nonexp', unit: '万円', show: ['ni', 'dep', 'eq', 'rp', 'dv'],
+    gen: r => ({ni: r.pick([150, 200, 250]), dep: r.pick([60, 80, 100]), eq: r.pick([300, 400, 500]), rp: r.pick([50, 100]), dv: r.pick([20, 30, 50])}),
+    hint: '利益から出発する。現金が出ない費用は足し戻し、費用にならない支出は引く。',
+    text: p => `今年の当期純利益は${f(p.ni)}万円。費用には減価償却費${f(p.dep)}万円が含まれる。ほかに、焙煎機の購入${f(p.eq)}万円、借入金の返済${f(p.rp)}万円、配当${f(p.dv)}万円を現金で払った（売上とほかの費用は、すべてその年に現金で受け払いした）。現金は1年でいくら増減した？（マイナスは ± キー）`,
+    solve: p => p.ni + p.dep - p.eq - p.rp - p.dv,
+    traps: [{v: p => p.ni - p.eq - p.rp - p.dv, why: '減価償却費は、現金が出ていない費用。利益から引かれている分を足し戻す。'}, {v: p => p.ni - p.dep - p.eq - p.rp - p.dv, myth: 'ch2.m.depcash', why: '減価償却費は利益の計算ですでに引かれている。しかも現金は出ていないので、さらに引くのではなく足し戻す。'}, {v: p => p.ni + p.dep, why: '費用にならない支出（焙煎機・返済・配当）も、現金は減らす。'}],
+    explain: p => `${f(p.ni)} ＋ ${f(p.dep)} − ${f(p.eq)} − ${f(p.rp)} − ${f(p.dv)} = ${sgn(p.ni + p.dep - p.eq - p.rp - p.dv)}万円。黒字でも、使い道によって現金は減る。`},
+  'ch2.q.l9.neg': {type: 'choice', skill: 'ch2.s.nonexp',
+    text: '赤字（当期純利益がマイナス）の年に、現金が増えることはある？',
+    options: () => [ok('ある。借入や出資、売掛金の回収、大きな減価償却費などで、赤字でも現金は増えうる'),
+      {t: 'ない。赤字なら現金は必ず減る', myth: 'ch2.m.profitcash', why: '赤字は「収益より費用が多い」というPLの話。借入をすれば、赤字でも現金は増える。'},
+      {t: 'ある。ただし配当を払った年だけ', why: '配当は現金を減らす。増やす方向には働かない。'}],
+    explain: '黒字でも現金は減りうるし、赤字でも現金は増えうる。利益と現金は、別のものさしだ。'},
+
+  /* ===== 10. 間接法と運転資本 ===== */
+  'ch2.q.l10.direct': {type: 'choice', skill: 'ch2.s.indirect',
+    text: '同じ会社の同じ年の営業CFを、直接法と間接法の両方で作った。金額はどうなる？',
+    options: () => [ok('同じになる。並べ方が違うだけで、数えている現金は同じ'),
+      {t: '間接法のほうが、減価償却費を足す分だけ大きくなる', myth: 'ch2.m.adddep', why: '減価償却費を足すのは、利益から引きすぎた分を戻すため。現金そのものが増えるわけではないので、直接法と同じ金額になる。'},
+      {t: '直接法のほうが正確なので、間接法とは少しずれる', why: 'どちらも帳簿から正確に作る。ずれたら誤り。'}],
+    explain: '直接法は「入金と支払いの一覧」、間接法は「利益から現金への橋渡し」。答えは同じで、間接法では利益と現金がなぜずれたかが見える。'},
+  'ch2.q.l10.why': {type: 'choice', skill: 'ch2.s.indirect',
+    text: '間接法で、当期純利益に減価償却費を足すのはなぜ？',
+    options: () => [ok('利益の計算で費用として引かれたが、現金は出ていない。引きすぎた分を戻すため'),
+      {t: '減価償却をすると、その分だけ現金が増えるから', myth: 'ch2.m.adddep', why: '減価償却で現金は1円も増えない。利益を出す計算で引いた分を、現金の計算では戻しているだけ。'},
+      {t: '減価償却費は収益の一種だから', why: '減価償却費は費用。費用なのに現金が出ていないから、戻す。'},
+      {t: '設備を買ったときに出ていった現金を、取り戻すため', why: '設備の購入代金は、投資CFに記録済み。営業CFで取り戻すものではない。'}],
+    explain: '間接法は「利益 ± 現金とのずれ」。減価償却費は、利益にはマイナス、現金には影響なし。だから足し戻す。'},
+  'ch2.q.l10.sort': {type: 'sort', skill: 'ch2.s.indirect', bins: ['足す', '引く'], pick: 6,
+    text: '間接法で営業CFを作るとき、当期純利益に足す？引く？',
+    items: () => [
+      {t: '減価償却費', bin: 0, myth: 'ch2.m.adddep', why: '現金が出ない費用なので、足し戻す。'},
+      {t: '売掛金の増加', bin: 1, myth: 'ch2.m.arplus', why: '売上には入ったが、現金はまだ。利益より現金が少ないので引く。'},
+      {t: '売掛金の減少', bin: 0}, {t: '在庫の増加', bin: 1, why: '仕入れて現金は出たのに、まだ費用（売上原価）になっていない。利益より現金が少ないので引く。'},
+      {t: '在庫の減少', bin: 0}, {t: '買掛金の増加', bin: 0, why: '原価（費用）にはなったが、まだ払っていない。利益より現金が多いので足す。'},
+      {t: '買掛金の減少', bin: 1}],
+    explain: '資産（売掛金・在庫）が増えたら引き、減ったら足す。負債（買掛金）が増えたら足し、減ったら引く。'},
+  'ch2.q.l10.wc': {type: 'number', skill: 'ch2.s.wc', unit: '万円', show: ['ar', 'inv', 'ap'],
+    gen: r => ({ar: r.pick([200, 300, 450]), inv: r.pick([100, 150, 200]), ap: r.pick([80, 120, 160])}),
+    text: p => `期末のBS：売掛金${f(p.ar)}万円、商品（在庫）${f(p.inv)}万円、買掛金${f(p.ap)}万円。運転資本はいくら？`,
+    solve: p => p.ar + p.inv - p.ap,
+    traps: [{v: p => p.ar + p.inv + p.ap, why: '買掛金は、まだ払っていないぶん現金を残してくれる。運転資本からは引く。'}, {v: p => p.ar - p.ap, why: '在庫も、仕入れた現金が寝ている状態。足す。'}],
+    explain: p => `${f(p.ar)} ＋ ${f(p.inv)} − ${f(p.ap)} = ${f(p.ar + p.inv - p.ap)}万円。これだけの現金が、商売の途中で寝ている。`},
+  'ch2.q.l10.wcdir': {type: 'choice', skill: 'ch2.s.wc', show: ['d'],
+    gen: r => ({d: r.pick([50, 80, 120])}),
+    text: p => `ほかの条件が同じで、今年は運転資本が${f(p.d)}万円増えた。営業CFはどうなる？`,
+    options: p => [ok(`運転資本が増えなかった場合より、${f(p.d)}万円少なくなる`),
+      {t: `運転資本が増えなかった場合より、${f(p.d)}万円多くなる`, myth: 'ch2.m.arplus', why: '運転資本は寝ているお金。増えるほど、その分の現金が商売の中に吸い込まれる。'},
+      {t: '営業CFには影響しない', why: '売掛金・在庫・買掛金の増減は、営業CFの調整そのもの。'}],
+    explain: '運転資本の増加 ＝ 現金が売掛金や在庫に姿を変えた分。営業CFは、その分だけ利益より少なくなる。'},
+  'ch2.q.l10.fill': {type: 'fill', skill: 'ch2.s.indirect', layout: 'list', unit: '万円', show: ['S', 'CG', 'SAL', 'D', 'dAR', 'dInv', 'dAP'],
+    gen: r => indirectCase(r, false),
+    text: p => `売上高${f(p.S)}万円、売上原価${f(p.CG)}万円、給料${f(p.SAL)}万円、減価償却費${f(p.D)}万円（ほかの費用・税金はない）。1年で売掛金は${f(p.dAR)}万円、在庫は${f(p.dInv)}万円、買掛金は${f(p.dAP)}万円増えた。間接法の空欄は？`,
+    rows: p => { const c = indirectOf(p); return [{label: '当期純利益', v: c.NI, blank: true}, {label: '＋ 減価償却費', v: p.D}, {label: '− 売掛金の増加', v: p.dAR}, {label: '− 在庫の増加', v: p.dInv}, {label: '＋ 買掛金の増加', v: p.dAP}, {label: '営業CF', v: c.OP, blank: true, total: true}]; },
+    explain: p => { const c = indirectOf(p); return `当期純利益 ${f(p.S)} − ${f(p.CG)} − ${f(p.SAL)} − ${f(p.D)} = ${f(c.NI)}。営業CF ${f(c.NI)} ＋ ${f(p.D)} − ${f(p.dAR)} − ${f(p.dInv)} ＋ ${f(p.dAP)} = ${f(c.OP)}万円。入金と支払いを1つずつ足す直接法でも、同じ${f(c.OP)}万円になる。`; }},
+  'ch2.q.l10.bs': {type: 'number', skill: 'ch2.s.indirect', unit: '万円', show: ['ni', 'D', 'a0', 'a1', 'i0', 'i1', 'p0', 'p1'],
+    gen: r => { const p = indirectCase(r, true), c = indirectOf(p); return Object.assign(p, {ni: c.NI, op: c.OP, a0: p.AR0, a1: p.AR0 + p.dAR, i0: p.I0, i1: p.I0 + p.dInv, p0: p.AP0, p1: p.AP0 + p.dAP}); },
+    hint: '期首と期末の差をとる。資産が増えたら引き、負債が増えたら足す。減ったら逆。',
+    text: p => `当期純利益${f(p.ni)}万円、減価償却費${f(p.D)}万円。BSの期首→期末は、売掛金 ${f(p.a0)}→${f(p.a1)}、商品 ${f(p.i0)}→${f(p.i1)}、買掛金 ${f(p.p0)}→${f(p.p1)}（万円）。営業CFはいくら？`,
+    solve: p => p.op,
+    traps: [{v: p => p.ni + p.D + p.dAR + p.dInv - p.dAP, why: '向きが逆。売掛金・在庫（資産）が増えたら引き、買掛金（負債）が増えたら足す。'}, {v: p => p.ni - p.dAR - p.dInv + p.dAP, myth: 'ch2.m.adddep', why: '減価償却費の足し戻しを忘れている。'}, {v: p => p.ni + p.D, why: '運転資本（売掛金・在庫・買掛金）の増減も調整する。'}],
+    explain: p => `増減は 売掛金 ${sgn(p.dAR)}、商品 ${sgn(p.dInv)}、買掛金 ${sgn(p.dAP)}。${f(p.ni)} ＋ ${f(p.D)} ${p.dAR >= 0 ? '−' : '＋'} ${f(Math.abs(p.dAR))} ${p.dInv >= 0 ? '−' : '＋'} ${f(Math.abs(p.dInv))} ${p.dAP >= 0 ? '＋' : '−'} ${f(Math.abs(p.dAP))} = ${f(p.op)}万円。`},
+
+  /* ===== 11. 黒字倒産（runSeed：同じレッスンの中では同じ会社の数字） ===== */
+  'ch2.q.l11.est': {type: 'estimate', skill: 'ch2.s.wc', unit: '万円', runSeed: true, show: ['s1', 'g', 'c', 'F', 'C0'],
+    gen: kuroji, min: -400, max: 600, step: 10, tol: 30, start: p => p.C0,
+    text: p => `ある焙煎会社。1か月目の売上${f(p.s1)}万円、その後は毎月${f(p.g)}万円ずつ伸びる。原価は売上の${p.c}%で、仕入れた月に現金で払う。固定費は毎月${f(p.F)}万円。売上の代金は2か月後に入金。最初の現金は${f(p.C0)}万円。毎月の利益はずっと黒字。6か月目の末、現金はいくら？`,
+    solve: p => kurojiMonths(p)[5].cash,
+    surprise: p => `6か月間の利益の合計は +${f(kurojiMonths(p)[5].cum)}万円。それなのに、現金はマイナス。`,
+    explain: '入金は2か月遅れ、支払いはその月。売上が伸びるほど、入金待ちの代金がふくらむ。'},
+  'ch2.q.l11.table': {type: 'fill', skill: 'ch2.s.wc', layout: 'list', unit: '万円', runSeed: true, show: ['s1', 'g', 'c', 'F', 'C0'],
+    gen: kuroji,
+    text: p => `資金繰り表をつけよう。1か月目の売上${f(p.s1)}万円、毎月${f(p.g)}万円ずつ伸びる。原価は売上の${p.c}%（その月に現金払い）、固定費は毎月${f(p.F)}万円。代金は売った2か月後に入金。最初の現金${f(p.C0)}万円。空欄は？（マイナスは ± キー）`,
+    rows: p => { const m = kurojiMonths(p); return [
+      {label: '1か月目：入金', v: m[0].inc}, {label: '1か月目：支払い（原価＋固定費）', v: m[0].pay}, {label: '1か月目末の現金', v: m[0].cash, blank: true, total: true},
+      {label: '2か月目：入金', v: m[1].inc}, {label: '2か月目：支払い', v: m[1].pay}, {label: '2か月目末の現金', v: m[1].cash, blank: true, total: true},
+      {label: '3か月目：入金', v: m[2].inc, blank: true}, {label: '3か月目：支払い', v: m[2].pay}, {label: '3か月目末の現金', v: m[2].cash, blank: true, total: true}]; },
+    explain: p => { const m = kurojiMonths(p); return `3か月目に初めて、1か月目の売上${f(m[0].s)}万円が入金される。月末の現金は ${f(p.C0)} → ${f(m[0].cash)} → ${f(m[1].cash)} → ${f(m[2].cash)}。この3か月の利益は ${m.slice(0, 3).map(x => '+' + f(x.profit)).join('、')}万円で、ずっと黒字。`; }},
+  'ch2.q.l11.ar': {type: 'number', skill: 'ch2.s.wc', unit: '万円', runSeed: true, show: ['s1', 'g'],
+    gen: kuroji,
+    text: p => `ある焙煎会社は、1か月目の売上${f(p.s1)}万円、その後は毎月${f(p.g)}万円ずつ売上が伸び、代金は売った2か月後に入金される。6か月目の末に、まだ入金されていない売上（売掛金）はいくら？`,
+    solve: p => { const m = kurojiMonths(p); return m[4].s + m[5].s; },
+    traps: [{v: p => kurojiMonths(p)[5].s, why: '入金は2か月後。5か月目の売上もまだ入っていない。'}, {v: p => { const m = kurojiMonths(p); return m[3].s + m[4].s + m[5].s; }, why: '4か月目の売上は、6か月目に入金済み。'}],
+    explain: p => { const m = kurojiMonths(p), ar = m[4].s + m[5].s; return `5か月目${f(m[4].s)} ＋ 6か月目${f(m[5].s)} = ${f(ar)}万円。最初の現金${f(p.C0)} ＋ 利益の合計${f(m[5].cum)} − 売掛金${f(ar)} = 6か月目末の現金${f(m[5].cash)}万円。利益はあるのに、売掛金に化けて手元にない。`; }},
+  'ch2.q.l11.judge': {type: 'judge', skill: 'ch2.s.wc', show: ['a', 'b'],
+    gen: r => ({a: r.pick([10, 20]), b: r.pick([50, 60, 80])}),
+    text: p => `A社とB社は同じ商売で、売上の代金はどちらも2か月後に入金。A社の売上は毎月${f(p.a)}万円ずつ、B社は毎月${f(p.b)}万円ずつ伸びている。途中で現金が足りなくなりやすいのは？`,
+    concl: () => [ok('B社'), {t: 'A社', myth: 'ch2.m.growthcash', why: '伸びがゆるやかなA社のほうが、入金を待つ売掛金の膨らみは小さい。'}, {t: '入金の条件が同じなので、同じ'}],
+    reasons: () => [ok('伸びが速いほど、入金より先に払う原価と固定費が積み上がり、入金待ちの売掛金が大きくなるから'),
+      {t: '伸びが速いB社のほうが利益が多く、現金も多く残るから', myth: 'ch2.m.growthcash', why: '利益が多くても、入金は2か月遅れる。伸びが速いほど、入金前に払う額が増える。'},
+      {t: '入金の条件が同じなら、伸び方は資金繰りに関係しないから', why: '入金待ちの売掛金は「直近2か月の売上」。伸びが速いほど大きくなる。'}],
+    explain: '成長は現金を食う。売上が速く伸びる会社ほど、運転資本の増加に備えた資金（借入の枠や出資）が要る。'},
+  'ch2.q.l11.need': {type: 'number', skill: 'ch2.s.wc', unit: '万円', show: ['M', 'M2', 'a', 'b', 'rc'],
+    gen: r => r.find(() => { const M = r.pick([200, 300, 400]); return {M, M2: M + r.pick([100, 200]), a: r.pick([1, 2, 3]), b: r.pick([1, 2, 2]), rc: r.pick([50, 60])}; }, p => U.isInt(p.M * p.rc / 100) && U.isInt(p.M2 * p.rc / 100)),
+    hint: '売掛金・在庫・買掛金が、売上が増えた分だけそれぞれいくら増えるかを考える。',
+    text: p => `月の売上が${f(p.M)}万円から${f(p.M2)}万円に増える。売掛金は売上の${p.a}か月分、在庫は原価の${p.b}か月分、買掛金は原価の1か月分を持つ（原価率${p.rc}%）。必要な運転資金はいくら増える？`,
+    solve: p => { const d = p.M2 - p.M; return d * p.a + d * p.rc / 100 * (p.b - 1); },
+    traps: [{v: p => p.M2 * p.a + p.M2 * p.rc / 100 * (p.b - 1), why: 'それは増えたあとの運転資金の総額。聞いているのは増える分。'}, {v: p => (p.M2 - p.M) * p.a, why: '在庫の増加（足す）と、買掛金の増加（引く）も入れる。'}, {v: p => { const d = p.M2 - p.M; return d * p.a + d * p.rc / 100 * (p.b + 1); }, why: '買掛金は支払いを待ってもらえる分。運転資金からは引く。'}],
+    explain: p => { const d = p.M2 - p.M, ar = d * p.a, inv = d * p.rc / 100 * p.b, ap = d * p.rc / 100; return `売上が${f(d)}万円増えると、売掛金 +${f(ar)}、在庫 +${f(inv)}、買掛金 +${f(ap)}。${f(ar)} ＋ ${f(inv)} − ${f(ap)} = ${f(ar + inv - ap)}万円。成長には、利益が入る前にこれだけの現金が要る。`; }},
+  'ch2.q.l11.sort': {type: 'sort', skill: 'ch2.s.wc', bins: ['資金繰りが楽になる', '苦しくなる'], pick: 6,
+    text: '次の手は、資金繰りを楽にする？苦しくする？',
+    items: () => [
+      {t: '卸先に、代金を1か月早く払ってもらう', bin: 0}, {t: '仕入先に、支払いを1か月待ってもらう', bin: 0}, {t: '売れ行きの鈍い在庫を減らす', bin: 0},
+      {t: '売上が伸びる前に、信用金庫と借入の枠を決めておく', bin: 0},
+      {t: '大口の卸先に、支払いは3か月後でよいと約束する', bin: 1, myth: 'ch2.m.growthcash', why: '入金が遅れるほど、入金前に払う額が増える。大口ほど影響は大きい。'},
+      {t: '値上がりを見越して、生豆を1年分まとめて買い込む', bin: 1, why: '在庫が増えると、その分の現金が倉庫で寝る。'},
+      {t: '手元の現金で、借入金を前倒しで返す', bin: 1, why: '利息は減るが、いざというときの現金が減る。'}],
+    explain: '入金を早める・支払いを遅らせる・在庫を減らす・資金を前もって用意する。その逆をすると苦しくなる。'},
+  'ch2.q.l11.plan': {type: 'choice', skill: 'ch2.s.wc',
+    text: '大口の卸先から「来月から注文を3倍にしたい。支払いは3か月後で」と言われた。社長として、まず何をする？',
+    options: () => [ok('資金繰り表を作り、現金が足りなくなる月と金額を確かめてから、借入の枠や支払条件を交渉する'),
+      {t: '利益が大きく増えるので、すぐに引き受ける', myth: 'ch2.m.growthcash', why: '利益は増えても、入金は3か月後。その間の仕入と支払いの現金が先に要る。'},
+      {t: '黒字倒産が怖いので、断る', why: '断る必要はない。足りなくなる現金を前もって手当てできれば、成長の機会になる。'}],
+    explain: '先に資金繰り表で「いつ、いくら足りないか」を見積もる。それが分かれば、借入・入金条件・在庫の調整で手を打てる。'},
+
+  /* ===== 大型案件：大口受注の1年（runSeed：同じ挑戦の中では同じ1年の数字） ===== */
+  'ch2.q.b.journal': {type: 'journal', skill: 'ch2.s.credit', runSeed: true, by: 'luka', show: ['h'],
+    gen: bossPlan,
+    text: p => `ホテルに1か月分の豆（売値${f(p.h)}万円、原価${f(p.h * p.c / 100)}万円）を納品した。代金は2か月後に受け取る。仕訳は？`,
+    txn: p => Txn.sellCredit(p.h, p.h * p.c / 100), extra: ['現金', '買掛金'], open: p => bossOpen(p),
+    traps: [{a: '現金', side: 'dr', myth: 'ch2.m.salescash', why: '代金は2か月後。今は現金ではなく売掛金が増える。'}, {a: '買掛金', side: 'cr', why: '買掛金は、仕入れて代金を払っていないときに使う。売った側は売掛金。'}],
+    explain: '（借）売掛金・売上原価 ／（貸）売上高・商品。売上と同時に、売れた豆の在庫が売上原価に移る。'},
+  'ch2.q.b.arrows': {type: 'arrows', skill: 'ch2.s.link', runSeed: true, by: 'luka', show: ['h'],
+    gen: bossPlan,
+    text: p => `ホテルへの1か月分の納品（売値${f(p.h)}万円、原価${f(p.h * p.c / 100)}万円、代金は2か月後）で、3つの表の数字はどう動く？`,
+    open: p => bossOpen(p), txn: p => Txn.sellCredit(p.h, p.h * p.c / 100), rows: ['売上高', '当期純利益', '現金', '売掛金', '商品', '営業CF'], label: lab3,
+    traps: [{when: a => a[2] === 1 || a[5] === 1, myth: 'ch2.m.salescash', why: '代金は2か月後。現金も営業CFも、まだ動かない。'}, {when: a => a[4] === 0, why: '納品した豆は倉庫からなくなる。商品（在庫）が減って、売上原価に移る。'}],
+    explain: p => `利益は +${f(p.h - p.h * p.c / 100)}万円。でも現金は1円も増えていない。この納品が毎月続く。`},
+  'ch2.q.b.dep': {type: 'number', skill: 'ch2.s.dep', unit: '万円', runSeed: true, by: 'luka', show: ['E', 'n'],
+    gen: bossPlan,
+    text: p => `ホテル向けに焙煎機を${f(p.E)}万円で買った。耐用年数${p.n}年、残存価額0、定額法。この焙煎機の1年分の減価償却費は？`,
+    solve: p => p.E / p.n,
+    traps: [{v: p => p.E, myth: 'ch2.m.equipexpense', why: '買った年に全額を費用にはしない。耐用年数で割って、毎年に配る。'}],
+    explain: p => `${f(p.E)} ÷ ${p.n} = ${f(p.E / p.n)}万円。今年の減価償却費は、前からある設備の${f(p.d0)}万円と合わせて${f(p.DEP)}万円になる。`},
+  'ch2.q.b.nonexp': {type: 'number', skill: 'ch2.s.nonexp', unit: '万円', runSeed: true, by: 'goda', show: ['E', 'R', 'SAL', 'RENT', 'I', 'T'],
+    gen: bossPlan,
+    text: p => `今年、現金で払ったもの：焙煎機${f(p.E)}万円、借入金の元本の返済${f(p.R)}万円、給料${f(p.SAL)}万円、家賃${f(p.RENT)}万円、利息${f(p.I)}万円、法人税等${f(p.T)}万円。このうち、PLの費用にならないものの合計は？`,
+    solve: p => p.E + p.R,
+    traps: [{v: p => p.E, why: '借入金の元本の返済も、費用にならない支出。'}, {v: p => p.E + p.R + p.I, why: '利息は費用（営業外費用）。費用にならないのは元本の返済のほう。'}, {v: p => p.R, myth: 'ch2.m.equipexpense', why: '焙煎機の購入代金は、買った年の費用にはならない。'}],
+    explain: p => `焙煎機${f(p.E)} ＋ 返済${f(p.R)} = ${f(p.E + p.R)}万円。給料・家賃・利息・税金は費用。`},
+  'ch2.q.b.pl': {type: 'fill', skill: 'ch2.s.pl', layout: 'list', unit: '万円', runSeed: true, by: 'goda',
+    gen: bossPlan,
+    text: '1年分のPL。法人税等は税引前利益の30%とする。空欄に入る数字は？',
+    rows: p => [{label: '売上高', v: p.S}, {label: '売上原価', v: p.CG}, {label: '売上総利益', v: p.gross, blank: true, total: true}, {label: '給料', v: p.SAL}, {label: '家賃', v: p.RENT}, {label: '減価償却費', v: p.DEP},
+      {label: '営業利益', v: p.opInc, blank: true, total: true}, {label: '支払利息', v: p.I}, {label: '経常利益（＝税引前当期純利益）', v: p.ord, total: true}, {label: '法人税等', v: p.T}, {label: '当期純利益', v: p.NI, blank: true, total: true}],
+    explain: p => `売上総利益 ${f(p.S)} − ${f(p.CG)} = ${f(p.gross)}。営業利益 ${f(p.gross)} − ${f(p.SAL)} − ${f(p.RENT)} − ${f(p.DEP)} = ${f(p.opInc)}。経常利益 ${f(p.opInc)} − ${f(p.I)} = ${f(p.ord)}。当期純利益 ${f(p.ord)} − ${f(p.T)} = ${f(p.NI)}万円。`},
+  'ch2.q.b.indirect': {type: 'fill', skill: 'ch2.s.indirect', layout: 'list', unit: '万円', runSeed: true, by: 'goda', show: ['AR0', 'I0', 'AP0'],
+    gen: bossPlan,
+    text: p => `営業CFを間接法で。期首→期末で、売掛金は${f(p.AR0)}→${f(p.AR0 + p.dAR)}、商品は${f(p.I0)}→${f(p.I0 + p.dInv)}、買掛金は${f(p.AP0)}→${f(p.AP0 + p.dAP)}（万円）。空欄は？`,
+    rows: p => [{label: '当期純利益', v: p.NI}, {label: '＋ 減価償却費', v: p.DEP}, {label: '− 売掛金の増加', v: p.dAR, blank: true}, {label: '− 在庫の増加', v: p.dInv}, {label: '＋ 買掛金の増加', v: p.dAP}, {label: '営業CF', v: p.OP, blank: true, total: true}],
+    explain: p => `${f(p.NI)} ＋ ${f(p.DEP)} − ${f(p.dAR)} − ${f(p.dInv)} ＋ ${f(p.dAP)} = ${f(p.OP)}万円。利益＋償却の${f(p.NI + p.DEP)}万円のうち、${f(p.dAR + p.dInv - p.dAP)}万円がホテルの売掛金と在庫に吸い込まれた。`},
+  'ch2.q.b.cash': {type: 'number', skill: 'ch2.s.cf', unit: '万円', runSeed: true, by: 'goda', show: ['C0', 'OP', 'E', 'B', 'R'],
+    gen: bossPlan,
+    text: p => `期首の現金${f(p.C0)}万円。今年の営業CFは+${f(p.OP)}万円。ほかに、焙煎機の購入${f(p.E)}万円、新しい借入${f(p.B)}万円、借入金の返済${f(p.R)}万円。期末の現金は？`,
+    solve: p => p.C1,
+    traps: [{v: p => p.C0 + p.OP - p.E - p.B - p.R, why: '借入は現金が入ってくる動き（財務CFのプラス）。足す。'}, {v: p => p.C0 + p.OP + p.B - p.R, why: '焙煎機の購入（投資CF）を引き忘れている。'}, {v: p => p.OP - p.E + p.B - p.R, why: '期首の現金を足し忘れている。'}],
+    explain: p => `営業 +${f(p.OP)}、投資 −${f(p.E)}、財務 ${sgn(p.B - p.R)}。${f(p.C0)} ${sgn(p.OP - p.E + p.B - p.R)} = ${f(p.C1)}万円。BSの現金と一致する。`},
+  'ch2.q.b.need': {type: 'number', skill: 'ch2.s.wc', unit: '万円', runSeed: true, by: 'goda', show: ['h', 'c'],
+    gen: bossPlan,
+    hint: '売掛金・在庫・買掛金が、それぞれいくら増えるかを出してから足し引きする。',
+    text: p => `来期、ホテル向けの売上が月${f(p.h)}万円から月${f(p.h * 2)}万円に倍増する。ホテルの分は、売掛金を売上の2か月分、在庫を原価の1か月分、買掛金を原価の半月分持つ（原価率${p.c}%）。必要な運転資金はいくら増える？`,
+    solve: p => p.dAR + p.dInv - p.dAP,
+    traps: [{v: p => p.dAR, why: '在庫の増加（足す）と、買掛金の増加（引く）も入れる。'}, {v: p => p.dAR + p.dInv + p.dAP, why: '買掛金は支払いを待ってもらえる分。運転資金からは引く。'}],
+    explain: p => `売掛金 +${f(p.dAR)}、在庫 +${f(p.dInv)}、買掛金 +${f(p.dAP)}。${f(p.dAR)} ＋ ${f(p.dInv)} − ${f(p.dAP)} = ${f(p.dAR + p.dInv - p.dAP)}万円。利益が入る前に、これだけの現金が先に要る。`},
+  'ch2.q.b.plan': {type: 'judge', skill: 'ch2.s.wc', runSeed: true, by: 'goda', show: ['NI'],
+    gen: bossPlan,
+    text: p => `今年は黒字（当期純利益${f(p.NI)}万円）。来期はホテルの注文が倍になる。{company}がまずすべきことは？`,
+    concl: () => [ok('増える運転資金の分を、借入の枠などで前もって手当てする'), {t: '黒字なので、特に何もしなくてよい', myth: 'ch2.m.growthcash', why: '注文が増えるほど、入金前に払う現金が増える。'}, {t: '現金が足りなくなるので、注文を断る', why: '断る必要はない。足りなくなる分を前もって用意できれば、成長の機会になる。'}],
+    reasons: () => [ok('売上が増えると、売掛金と在庫が先に増え、入金より前に現金が出ていくから'),
+      {t: '利益が増えれば、現金も同じだけ増えるから', myth: 'ch2.m.profitcash', why: '増えた売上の代金は2か月後。その間の仕入と支払いは先に出ていく。'},
+      {t: '借入をすると利息がかかり、損をするだけだから', why: '利息の負担より、資金が尽きて仕入や給料が払えなくなる損のほうがはるかに大きい。'}],
+    explain: '成長の前に、資金繰り表で足りなくなる月と金額を確かめ、借入の枠や支払条件を整えておく。'},
+  'ch2.q.b.div': {type: 'arrows', skill: 'ch2.s.nonexp', runSeed: true, by: 'mina', show: ['V'],
+    gen: bossPlan,
+    text: p => `決算のあと、株主に配当${f(p.V)}万円を現金で払う。次の数字はどう動く？`,
+    open: p => bossEnd(p), txn: p => Txn.dividend(p.V), rows: ['当期純利益', '利益剰余金', '現金', '財務CF'], label: lab3,
+    traps: [{when: a => a[0] === -1, myth: 'ch2.m.dividendexpense', why: '配当は費用ではない。PLの当期純利益は変わらず、利益剰余金から直接減る。'}],
+    explain: '配当は、稼いだ利益の積み立て（利益剰余金）を株主に分けること。現金が減り、CFでは財務CFのマイナス。'},
+  'ch2.q.b.re': {type: 'number', skill: 'ch2.s.link', unit: '万円', runSeed: true, by: 'mina', show: ['RE0', 'NI', 'V'],
+    gen: bossPlan,
+    text: p => `期首の利益剰余金は${f(p.RE0)}万円。今年の当期純利益は${f(p.NI)}万円で、配当を${f(p.V)}万円払う。配当のあとの利益剰余金は？`,
+    solve: p => p.RE0 + p.NI - p.V,
+    traps: [{v: p => p.RE0 + p.NI, why: '配当で払った分は、利益剰余金から出ていく。'}, {v: p => p.NI - p.V, why: '期首の利益剰余金を足し忘れている。'}],
+    explain: p => `${f(p.RE0)} ＋ ${f(p.NI)} − ${f(p.V)} = ${f(p.RE0 + p.NI - p.V)}万円。PLの利益がBSに積み上がり、配当でその一部が株主へ渡る。`},
+
+  /* ===== 飛び込み相談（第2章後半） ===== */
+  'ch2.q.r.inv': {type: 'number', skill: 'ch2.s.cogs', unit: '万円', by: 'sakana', show: ['b', 'pu', 'e', 'x'],
+    gen: r => ({b: r.pick([60, 80, 100]), pu: r.pick([900, 1100, 1300]), e: r.pick([120, 150, 180]), x: r.pick([20, 30, 40])}),
+    text: p => `魚屋の1年：期首の在庫${f(p.b)}万円、仕入${f(p.pu)}万円。帳簿の上では期末の在庫は${f(p.e)}万円のはずが、冷凍庫を実際に数えると${f(p.x)}万円分少なかった（傷んで捨てた分）。実際に数えた在庫で計算した売上原価は？`,
+    solve: p => p.b + p.pu - (p.e - p.x),
+    traps: [{v: p => p.b + p.pu - p.e, why: '帳簿の在庫ではなく、実際に数えた在庫を使う。なくなった分も費用に含まれる。'}, {v: p => p.b + p.pu - p.e - p.x, why: '在庫が少ないほど、売上原価は大きくなる。引くのではなく足す向き。'}],
+    explain: p => `期末の在庫は ${f(p.e)} − ${f(p.x)} = ${f(p.e - p.x)}万円。売上原価は ${f(p.b)} ＋ ${f(p.pu)} − ${f(p.e - p.x)} = ${f(p.b + p.pu - p.e + p.x)}万円。傷んだ${f(p.x)}万円分も利益を押し下げる（実務では「棚卸減耗損」として分けて示すこともある）。`},
+  'ch2.q.r.kuroji': {type: 'number', skill: 'ch2.s.wc', unit: '万円', by: 'yaoya', show: ['c0', 'inc', 'pay', 'fx'],
+    gen: r => r.find(() => ({c0: r.pick([50, 80, 100]), inc: r.pick([200, 250, 300]), pay: r.pick([300, 360, 420]), fx: r.pick([40, 60])}), p => p.c0 + p.inc - p.pay - p.fx < 0),
+    text: p => `八百屋の今月：月初の現金${f(p.c0)}万円。入金は2か月前の売上の代金${f(p.inc)}万円。売上が倍になって仕入も増え、今月の仕入の支払いは${f(p.pay)}万円、固定費は${f(p.fx)}万円。月末の現金は？（マイナスは ± キー）`,
+    solve: p => p.c0 + p.inc - p.pay - p.fx,
+    traps: [{v: p => p.c0 + p.inc - p.pay, why: '固定費の支払いも引く。'}, {v: p => p.inc - p.pay - p.fx, why: '月初の現金を足し忘れている。'}],
+    explain: p => `${f(p.c0)} ＋ ${f(p.inc)} − ${f(p.pay)} − ${f(p.fx)} = ${f(p.c0 + p.inc - p.pay - p.fx)}万円。売上が倍になっても、入ってくるのは2か月前の（少ない）売上の代金。先に払う仕入が大きくなるので、月末に足りなくなる。`},
 
   /* ===== 飛び込み相談 ===== */
   'ch2.q.r.special': {type: 'number', skill: 'ch2.s.pl', unit: '万円', by: 'sakaya', show: ['g', 's', 'i', 'x'],
